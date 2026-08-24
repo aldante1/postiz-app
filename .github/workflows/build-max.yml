@@ -1,0 +1,87 @@
+---
+name: Build MAX Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Immutable GHCR tag (must start with max-v)
+        required: true
+        default: max-v2.23.0-1
+        type: string
+  push:
+    tags:
+      - 'max-v*'
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/aldante1/postiz-app
+  IMAGE_TAG: ${{ inputs.image_tag || github.ref_name }}
+
+jobs:
+  build-max:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.20.0
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.1
+          run_install: false
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run MAX provider contracts
+        run: >-
+          pnpm exec jest --config jest.max.config.cjs
+          libraries/nestjs-libraries/src/integrations/social/max.provider.spec.ts
+          --runInBand
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Validate immutable tag
+        run: |
+          case "$IMAGE_TAG" in
+            max-v*) ;;
+            *) echo "IMAGE_TAG must start with max-v" >&2; exit 1 ;;
+          esac
+          if docker buildx imagetools inspect "$IMAGE:$IMAGE_TAG" >/dev/null 2>&1; then
+            echo "$IMAGE:$IMAGE_TAG already exists; refusing to overwrite immutable tag" >&2
+            exit 1
+          fi
+
+      - name: Build and push linux/amd64 image
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --file Dockerfile.dev \
+            --tag "$IMAGE:$IMAGE_TAG" \
+            --build-arg "NEXT_PUBLIC_VERSION=$IMAGE_TAG" \
+            --provenance=false \
+            --sbom=false \
+            --push \
+            .
+
+      - name: Verify pushed manifest
+        run: docker buildx imagetools inspect "$IMAGE:$IMAGE_TAG"
