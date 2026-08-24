@@ -595,7 +595,9 @@ describe('MAX secure custom-field transport contracts', () => {
           timezone: '0',
         })
       )
-    ).rejects.toThrow(/provider refused synthetic credentials/i);
+    ).rejects.toMatchObject({
+      message: 'provider refused synthetic credentials',
+    });
 
     const authenticateIndex = redis.operationIndex('authenticate');
     for (const key of [
