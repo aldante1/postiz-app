@@ -9,6 +9,11 @@ import type {
   PostDetails,
   PostResponse,
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
+import { SocialAbstract } from '@gitroom/nestjs-libraries/integrations/social.abstract';
+import {
+  createSsrfSafeLookup,
+  getSsrfSafeDispatcher,
+} from '@gitroom/nestjs-libraries/dtos/webhooks/ssrf.safe.dispatcher';
 
 jest.mock('@gitroom/helpers/utils/timer', () => ({
   timer: jest.fn(async () => undefined),
@@ -16,6 +21,7 @@ jest.mock('@gitroom/helpers/utils/timer', () => ({
 jest.mock('axios');
 
 import { MaxProvider } from './max.provider';
+import { getMaxDispatcher, getMaxHttpsAgent } from './max.tls';
 
 const MAX_API_BASE = 'https://platform-api2.max.ru';
 const SYNTHETIC_TOKEN = 'max_synthetic_token_for_tests_0000000000000000000000';
@@ -33,6 +39,18 @@ const UPLOAD_RETRY_ERROR = 'MAX transient upload failure';
 type FetchMock = jest.MockedFunction<
   (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => Promise<Response>
 >;
+type DnsLookupCallback = (
+  err: NodeJS.ErrnoException | null,
+  address: string | Array<{ address: string; family: number }>,
+  family: number
+) => void;
+
+type DnsLookup = (
+  hostname: string,
+  options: { all?: boolean },
+  callback: DnsLookupCallback
+) => void;
+
 
 type CustomField = {
   key: string;
@@ -191,6 +209,14 @@ function createProvider(): MaxProviderContract {
   return new MaxProvider() as MaxProviderContract;
 }
 
+class NonMaxFetchProbe extends SocialAbstract {
+  identifier = 'non-max-fetch-probe';
+
+  fetchThroughBaseClass(url: string) {
+    return this.fetch(url, {}, this.identifier);
+  }
+}
+
 
 const botFixture: MaxBotFixture = {
   user_id: 700000000001,
@@ -337,6 +363,48 @@ describe('MaxProvider authentication contract', () => {
       `${MAX_API_BASE}/chats/${SYNTHETIC_CHAT_ID}/members/me`,
     ]);
     expectNoConsoleLeak([encoded]);
+  });
+
+  it('carries the cached MAX dispatcher on each authentication API probe', async () => {
+    const maxDispatcher = getMaxDispatcher();
+    expect(getMaxDispatcher()).toBe(maxDispatcher);
+    const { provider, calls } = providerWithFetchRecorder(async (request) => {
+      if (request.url === `${MAX_API_BASE}/me`) {
+        return jsonResponse(botFixture);
+      }
+
+      if (request.url === `${MAX_API_BASE}/chats/${SYNTHETIC_CHAT_ID}`) {
+        return jsonResponse(activeChannelFixture);
+      }
+
+      if (
+        request.url === `${MAX_API_BASE}/chats/${SYNTHETIC_CHAT_ID}/members/me`
+      ) {
+        return jsonResponse(adminMembershipFixture);
+      }
+
+      throwUnexpectedRequest(request);
+    });
+
+    const result = await provider.authenticate({
+      code: encodeCredentials(),
+      codeVerifier: '',
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        accessToken: SYNTHETIC_TOKEN,
+        id: SYNTHETIC_CHAT_ID,
+      })
+    );
+    expect(calls).toHaveLength(3);
+    [
+      '/me',
+      `/chats/${SYNTHETIC_CHAT_ID}`,
+      `/chats/${SYNTHETIC_CHAT_ID}/members/me`,
+    ].forEach((pathWithQuery, index) => {
+      expectMaxApiCall(calls[index], pathWithQuery, 'GET');
+    });
   });
 
   it('preserves the normalized input chat_id as integration id when MAX returns an unsafe rounded number', async () => {
@@ -506,6 +574,44 @@ describe('MaxProvider authentication contract', () => {
   });
 });
 
+describe('MAX TLS/SSRF dispatcher contract', () => {
+  it.each(['127.0.0.1', '10.0.0.1', '169.254.169.254'])(
+    'rejects unsafe literal destination %s without DNS resolution',
+    async (hostname) => {
+      await expect(resolveWithLookup(createSsrfSafeLookup(), hostname)).rejects.toThrow(
+        /blocked/i
+      );
+    }
+  );
+
+  it('accepts a public literal destination without DNS resolution', async () => {
+    await expect(resolveWithLookup(createSsrfSafeLookup(), '8.8.8.8')).resolves.toEqual({
+      address: '8.8.8.8',
+      family: 4,
+    });
+  });
+
+  it('keeps non-MAX SocialAbstract.fetch on the generic SSRF dispatcher', async () => {
+    const ssrfDispatcher = getSsrfSafeDispatcher();
+    const maxDispatcher = getMaxDispatcher();
+    const probe = new NonMaxFetchProbe();
+    const fetchMock = jest.spyOn(globalThis, 'fetch') as FetchMock;
+    fetchMock.mockResolvedValue(jsonResponse({ ok: true }));
+
+    await probe.fetchThroughBaseClass('https://public.example.test/non-max-probe');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://public.example.test/non-max-probe');
+    expect((init as RequestInit & { dispatcher?: unknown }).dispatcher).toBe(
+      ssrfDispatcher
+    );
+    expect((init as RequestInit & { dispatcher?: unknown }).dispatcher).not.toBe(
+      maxDispatcher
+    );
+  });
+});
+
 describe('MaxProvider publication contract', () => {
   it('publishes a single text post to the channel chat_id and maps message.body.mid plus message.url', async () => {
     const { provider, calls } = providerWithFetchRecorder(async (request) => {
@@ -667,6 +773,45 @@ describe('MaxProvider publication contract', () => {
     expect(mockedAxiosPost().mock.calls.map(([url]) => String(url))).toEqual([
       publicationFixture.uploads.imageOne.url,
       publicationFixture.uploads.imageTwo.url,
+    ]);
+    expectNoTokenInUrls(calls);
+  });
+
+  it('rejects private MAX upload allocation URLs before axios upload or message send', async () => {
+    const imageContent = Buffer.concat([tinyPng(), Buffer.from('private-upload')]);
+    const imagePath = createTempMediaFile('max-private-upload-url.png', imageContent);
+    const privateUploadUrl =
+      'http://127.0.0.1/max-upload?secret=max-private-upload-url-secret';
+    const { provider, calls } = providerWithFetchRecorder(async (request) => {
+      if (isMaxUploadAllocation(request, 'image')) {
+        return jsonResponse({ url: privateUploadUrl });
+      }
+
+      if (isMaxMessageRequest(request)) {
+        throw new Error('MAX message send must not run after a private upload URL');
+      }
+
+      throwUnexpectedRequest(request);
+    });
+    mockImageDimensions(provider);
+    mockedAxiosPost().mockImplementation(async () => {
+      throw new Error('axios upload must not run for a private MAX upload URL');
+    });
+
+    await expectPublicationRejectsWithoutLeaks(
+      provider.post(
+        SYNTHETIC_CHAT_ID,
+        SYNTHETIC_TOKEN,
+        [maxPost({ media: [{ type: 'image', path: imagePath }] })],
+        syntheticIntegration()
+      ),
+      'MAX media upload URL must be public HTTPS.',
+      [privateUploadUrl, 'max-private-upload-url-secret']
+    );
+
+    expect(mockedAxiosPost()).not.toHaveBeenCalled();
+    expect(calls.map((call) => call.url)).toEqual([
+      `${MAX_API_BASE}/uploads?type=image`,
     ]);
     expectNoTokenInUrls(calls);
   });
@@ -1240,6 +1385,40 @@ function recordFetch(
   };
 }
 
+function requestDispatcher(request: RecordedFetchCall): unknown {
+  if (!request.init || typeof request.init !== 'object') {
+    return undefined;
+  }
+
+  return (request.init as RequestInit & { dispatcher?: unknown }).dispatcher;
+}
+
+function expectMaxDispatcher(request: RecordedFetchCall) {
+  expect(requestDispatcher(request)).toBe(getMaxDispatcher());
+}
+
+function resolveWithLookup(
+  lookupFactoryResult: unknown,
+  hostname: string
+): Promise<{ address: string; family: number }> {
+  const lookup = lookupFactoryResult as DnsLookup;
+  return new Promise((resolve, reject) => {
+    lookup(hostname, {}, (err, address, family) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+
+      if (Array.isArray(address)) {
+        resolve(address[0]);
+        return;
+      }
+
+      resolve({ address, family });
+    });
+  });
+}
+
 function maxPost(overrides: Partial<PostDetails> = {}): PostDetails {
   return {
     id: SYNTHETIC_POST_ID,
@@ -1366,6 +1545,7 @@ function expectAxiosUpload(
   expect(form).toBeInstanceOf(FormDataUpload);
   expect(uploadConfigHeader(config, 'Authorization')).toBeUndefined();
   expect(uploadConfigMaxBodyLength(config)).toBe(Infinity);
+  expectMaxUploadTransportConfig(config);
   expect(uploadConfigHeader(config, 'authorization')).toBeUndefined();
   return expectNodeReadableMultipartField(form, 'data');
 }
@@ -1394,11 +1574,27 @@ function uploadConfigMaxBodyLength(config: unknown): unknown {
   return config.maxBodyLength;
 }
 
+function expectMaxUploadTransportConfig(config: unknown) {
+  expect(uploadConfigValue(config, 'httpsAgent')).toBe(getMaxHttpsAgent());
+  expect(uploadConfigValue(config, 'maxRedirects')).toBe(0);
+  expect(uploadConfigValue(config, 'proxy')).toBe(false);
+}
+
+function uploadConfigValue(config: unknown, name: string): unknown {
+  if (!config || typeof config !== 'object' || !(name in config)) {
+    return undefined;
+  }
+
+  return (config as Record<string, unknown>)[name];
+}
+
+
 function isMaxUploadAllocation(request: RecordedFetchCall, type: 'image' | 'video') {
   const isMatch =
     request.url === `${MAX_API_BASE}/uploads?type=${type}` && request.method === 'POST';
   if (isMatch) {
     expect(headerValue(request.headers, 'Authorization')).toBe(SYNTHETIC_TOKEN);
+    expectMaxDispatcher(request);
   }
   return isMatch;
 }
@@ -1409,6 +1605,7 @@ function isMaxMessageRequest(request: RecordedFetchCall) {
     request.method === 'POST';
   if (isMatch) {
     expect(headerValue(request.headers, 'Authorization')).toBe(SYNTHETIC_TOKEN);
+    expectMaxDispatcher(request);
   }
   return isMatch;
 }
@@ -1422,6 +1619,7 @@ function expectMaxApiCall(
   expect(request.method).toBe(method);
   expect(request.url).not.toContain(SYNTHETIC_TOKEN);
   expect(headerValue(request.headers, 'Authorization')).toBe(SYNTHETIC_TOKEN);
+  expectMaxDispatcher(request);
 }
 
 async function requestJson(request: RecordedFetchCall): Promise<unknown> {
