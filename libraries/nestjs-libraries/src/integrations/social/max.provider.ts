@@ -533,6 +533,7 @@ export class MaxProvider extends SocialAbstract implements SocialProvider {
     }
 
     if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
       return undefined;
     }
 

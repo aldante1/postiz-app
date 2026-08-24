@@ -494,6 +494,20 @@ describe('MaxProvider authentication contract', () => {
     expectNoConsoleLeak([encoded]);
   });
 
+  it('cancels a rejected MAX authentication response body before returning', async () => {
+    const rejectedResponse = jsonResponse({ error: 'unauthorized' }, 401);
+    const cancelSpy = jest.spyOn(rejectedResponse.body!, 'cancel');
+    const { provider } = providerWithFetch(rejectedResponse);
+
+    const result = await provider.authenticate({
+      code: encodeCredentials(),
+      codeVerifier: '',
+    });
+
+    expectAuthError(result, ERROR_INVALID_TOKEN);
+    expect(cancelSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('rejects a chat that is not a channel', async () => {
     const { provider, fetchMock } = providerWithFetch(
       jsonResponse(botFixture),
@@ -575,7 +589,32 @@ describe('MaxProvider authentication contract', () => {
 });
 
 describe('MAX TLS/SSRF dispatcher contract', () => {
-  it.each(['127.0.0.1', '10.0.0.1', '169.254.169.254'])(
+  it('loads the pinned PEM when the backend process cwd is its workspace package', async () => {
+    const repositoryRoot = process.cwd();
+    jest.spyOn(process, 'cwd').mockReturnValue(path.join(repositoryRoot, 'apps/backend'));
+    let isolatedDispatcher: ReturnType<typeof getMaxDispatcher> | undefined;
+    let isolatedHttpsAgent: ReturnType<typeof getMaxHttpsAgent> | undefined;
+
+    jest.isolateModules(() => {
+      const isolatedTls = require('./max.tls') as typeof import('./max.tls');
+      isolatedDispatcher = isolatedTls.getMaxDispatcher();
+      isolatedHttpsAgent = isolatedTls.getMaxHttpsAgent();
+    });
+
+    expect(isolatedDispatcher).toBeDefined();
+    expect(isolatedHttpsAgent).toBeDefined();
+    await isolatedDispatcher!.close();
+    isolatedHttpsAgent!.destroy();
+  });
+
+  it.each([
+    '127.0.0.1',
+    '10.0.0.1',
+    '169.254.169.254',
+    '::ffff:7f00:1',
+    '::ffff:a00:1',
+    '::ffff:a9fe:a9fe',
+  ])(
     'rejects unsafe literal destination %s without DNS resolution',
     async (hostname) => {
       await expect(resolveWithLookup(createSsrfSafeLookup(), hostname)).rejects.toThrow(
@@ -777,44 +816,57 @@ describe('MaxProvider publication contract', () => {
     expectNoTokenInUrls(calls);
   });
 
-  it('rejects private MAX upload allocation URLs before axios upload or message send', async () => {
-    const imageContent = Buffer.concat([tinyPng(), Buffer.from('private-upload')]);
-    const imagePath = createTempMediaFile('max-private-upload-url.png', imageContent);
-    const privateUploadUrl =
-      'http://127.0.0.1/max-upload?secret=max-private-upload-url-secret';
-    const { provider, calls } = providerWithFetchRecorder(async (request) => {
-      if (isMaxUploadAllocation(request, 'image')) {
-        return jsonResponse({ url: privateUploadUrl });
-      }
+  it.each([
+    [
+      'HTTP loopback',
+      'http://127.0.0.1/max-upload?secret=max-private-upload-url-secret',
+    ],
+    [
+      'canonical IPv4-mapped IPv6 loopback',
+      'https://[::ffff:7f00:1]/max-upload?secret=max-private-upload-url-secret',
+    ],
+  ])(
+    'rejects %s MAX upload allocation URLs before axios upload or message send',
+    async (_case, privateUploadUrl) => {
+      const imageContent = Buffer.concat([tinyPng(), Buffer.from('private-upload')]);
+      const imagePath = createTempMediaFile(
+        'max-private-upload-url.png',
+        imageContent
+      );
+      const { provider, calls } = providerWithFetchRecorder(async (request) => {
+        if (isMaxUploadAllocation(request, 'image')) {
+          return jsonResponse({ url: privateUploadUrl });
+        }
 
-      if (isMaxMessageRequest(request)) {
-        throw new Error('MAX message send must not run after a private upload URL');
-      }
+        if (isMaxMessageRequest(request)) {
+          throw new Error('MAX message send must not run after a private upload URL');
+        }
 
-      throwUnexpectedRequest(request);
-    });
-    mockImageDimensions(provider);
-    mockedAxiosPost().mockImplementation(async () => {
-      throw new Error('axios upload must not run for a private MAX upload URL');
-    });
+        throwUnexpectedRequest(request);
+      });
+      mockImageDimensions(provider);
+      mockedAxiosPost().mockImplementation(async () => {
+        throw new Error('axios upload must not run for a private MAX upload URL');
+      });
 
-    await expectPublicationRejectsWithoutLeaks(
-      provider.post(
-        SYNTHETIC_CHAT_ID,
-        SYNTHETIC_TOKEN,
-        [maxPost({ media: [{ type: 'image', path: imagePath }] })],
-        syntheticIntegration()
-      ),
-      'MAX media upload URL must be public HTTPS.',
-      [privateUploadUrl, 'max-private-upload-url-secret']
-    );
+      await expectPublicationRejectsWithoutLeaks(
+        provider.post(
+          SYNTHETIC_CHAT_ID,
+          SYNTHETIC_TOKEN,
+          [maxPost({ media: [{ type: 'image', path: imagePath }] })],
+          syntheticIntegration()
+        ),
+        'MAX media upload URL must be public HTTPS.',
+        [privateUploadUrl, 'max-private-upload-url-secret']
+      );
 
-    expect(mockedAxiosPost()).not.toHaveBeenCalled();
-    expect(calls.map((call) => call.url)).toEqual([
-      `${MAX_API_BASE}/uploads?type=image`,
-    ]);
-    expectNoTokenInUrls(calls);
-  });
+      expect(mockedAxiosPost()).not.toHaveBeenCalled();
+      expect(calls.map((call) => call.url)).toEqual([
+        `${MAX_API_BASE}/uploads?type=image`,
+      ]);
+      expectNoTokenInUrls(calls);
+    }
+  );
 
   it('streams video through axios FormData and falls back to the allocation token when upload returns only retval metadata', async () => {
     const videoContent = Buffer.from('synthetic max video bytes\n');

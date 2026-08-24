@@ -46,12 +46,17 @@ export function isBlockedIp(ip: string): boolean {
     return isBlockedIPv4(ip);
   }
   if (version === 6) {
-    // IPv4-mapped IPv6 (::ffff:a.b.c.d) — extract and check as IPv4
-    const mapped = ip.toLowerCase().match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+    // Canonicalize every valid mapped form (for example ::ffff:7f00:1)
+    // before applying the IPv4 ranges. Node normalizes it to dotted IPv4.
+    const canonical = new net.SocketAddress({
+      address: ip,
+      family: 'ipv6',
+    }).address.toLowerCase();
+    const mapped = canonical.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
     if (mapped) {
       return isBlockedIPv4(mapped[1]);
     }
-    return isBlockedIPv6(ip);
+    return isBlockedIPv6(canonical);
   }
   return true;
 }

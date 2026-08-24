@@ -52,13 +52,20 @@ async function main() {
     );
   }
 
-  const response = await fetch(MAX_ME_URL, {
-    method: 'GET',
-    headers: {
-      Authorization: INTENTIONALLY_INVALID_TOKEN,
-    },
-    dispatcher: tlsHelper.getMaxDispatcher(),
-  });
+  const dispatcher = tlsHelper.getMaxDispatcher();
+  let response;
+  try {
+    response = await fetch(MAX_ME_URL, {
+      method: 'GET',
+      headers: {
+        Authorization: INTENTIONALLY_INVALID_TOKEN,
+      },
+      dispatcher,
+    });
+    await response.body?.cancel();
+  } finally {
+    await dispatcher.close();
+  }
 
   if (response.status !== 401) {
     fail(`expected MAX /me to reject the invalid token with HTTP 401, got ${response.status}`);
