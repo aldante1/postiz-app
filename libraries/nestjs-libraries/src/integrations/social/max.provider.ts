@@ -8,12 +8,14 @@ import {
   BadBody,
   SocialAbstract,
 } from '@gitroom/nestjs-libraries/integrations/social.abstract';
-import { getSsrfSafeDispatcher } from '@gitroom/nestjs-libraries/dtos/webhooks/ssrf.safe.dispatcher';
+import { isBlockedIp } from '@gitroom/nestjs-libraries/dtos/webhooks/webhook.url.validator';
 import { hasExtension } from '@gitroom/helpers/utils/has.extension';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
 import { Integration } from '@prisma/client';
 import axios from 'axios';
 import FormDataUpload from 'form-data';
+import net from 'node:net';
+import { getMaxDispatcher, getMaxHttpsAgent } from './max.tls';
 
 const MAX_API_BASE = 'https://platform-api2.max.ru';
 const MAX_INT64_MIN_ABS = '9223372036854775808';
@@ -54,6 +56,7 @@ const ERROR_INVALID_MESSAGE_RESPONSE =
   'MAX did not return a valid message response.';
 const ERROR_INVALID_UPLOAD_RESPONSE =
   'MAX media upload did not return a valid upload response.';
+const ERROR_INVALID_UPLOAD_URL = 'MAX media upload URL must be public HTTPS.';
 
 type MaxCredentials = {
   token: string;
@@ -275,6 +278,8 @@ export class MaxProvider extends SocialAbstract implements SocialProvider {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(body),
+          // @ts-ignore - undici-only option; MAX uses scoped pinned Russian root CA transport
+          dispatcher: getMaxDispatcher(),
         },
         this.identifier
       )
@@ -348,6 +353,8 @@ export class MaxProvider extends SocialAbstract implements SocialProvider {
           headers: {
             Authorization: botToken,
           },
+          // @ts-ignore - undici-only option; MAX uses scoped pinned Russian root CA transport
+          dispatcher: getMaxDispatcher(),
         },
         this.identifier
       )
@@ -356,6 +363,10 @@ export class MaxProvider extends SocialAbstract implements SocialProvider {
     const uploadUrl = allocation.url;
     if (!uploadUrl) {
       throw new BadBody(this.identifier, '{}', '{}', ERROR_MISSING_UPLOAD_URL);
+    }
+
+    if (!this.isPublicHttpsUploadUrl(uploadUrl)) {
+      throw new BadBody(this.identifier, '{}', '{}', ERROR_INVALID_UPLOAD_URL);
     }
 
     const uploadResponse = await this.runStreamedUpload<MaxUploadResponse>(
@@ -369,7 +380,10 @@ export class MaxProvider extends SocialAbstract implements SocialProvider {
 
         const { data } = await axios.post(uploadUrl, form, {
           headers: form.getHeaders(),
+          httpsAgent: getMaxHttpsAgent(),
           maxBodyLength: Infinity,
+          maxRedirects: 0,
+          proxy: false,
         });
 
         if (!data || typeof data !== 'object' || Array.isArray(data)) {
@@ -419,6 +433,27 @@ export class MaxProvider extends SocialAbstract implements SocialProvider {
   private mediaFilename(mediaPath: string) {
     const withoutQuery = mediaPath.split('?')[0];
     return withoutQuery.split('/').pop() || 'media';
+  }
+
+  private isPublicHttpsUploadUrl(value: string) {
+    let parsed: URL;
+    try {
+      parsed = new URL(value);
+    } catch {
+      return false;
+    }
+
+    if (parsed.protocol !== 'https:' || !parsed.hostname) {
+      return false;
+    }
+
+    const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    if (hostname === 'localhost') {
+      return false;
+    }
+
+    const literalIpFamily = net.isIP(hostname);
+    return !literalIpFamily || !isBlockedIp(hostname);
   }
 
   private parseCredentials(code: string): MaxCredentials | string {
@@ -490,8 +525,8 @@ export class MaxProvider extends SocialAbstract implements SocialProvider {
         headers: {
           Authorization: token,
         },
-        // @ts-ignore - undici-only option; blocks SSRF to internal IPs
-        dispatcher: getSsrfSafeDispatcher(),
+        // @ts-ignore - undici-only option; MAX uses scoped pinned Russian root CA transport
+        dispatcher: getMaxDispatcher(),
       });
     } catch (err) {
       return undefined;
