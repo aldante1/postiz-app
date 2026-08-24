@@ -169,6 +169,11 @@ afterEach(() => {
 });
 
 describe('MaxProvider authentication contract', () => {
+
+  it('opts in to secure custom-field transport', () => {
+    expect(new MaxProvider().secureCustomFields).toBe(true);
+  });
+
   it('exposes a required bot token and signed int64 channel chat id as custom fields', async () => {
     const fields: CustomField[] = await createProvider().customFields();
 

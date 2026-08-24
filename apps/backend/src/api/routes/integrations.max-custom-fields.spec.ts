@@ -265,7 +265,7 @@ type MockProvider = {
   scopes: string[];
   oneTimeToken: boolean;
   secureCustomFields?: boolean;
-  customFields: jest.MockedFunction<NonNullable<SocialProvider['customFields']>>;
+  customFields?: jest.MockedFunction<NonNullable<SocialProvider['customFields']>>;
   authenticate: jest.MockedFunction<SocialProvider['authenticate']>;
 };
 
@@ -307,7 +307,7 @@ function createManager(providers: Record<string, MockProvider>) {
       social: Object.values(providers).map((provider) => ({
         identifier: provider.identifier,
         name: provider.name,
-        customFields: MAX_CUSTOM_FIELDS,
+        ...(provider.customFields ? { customFields: MAX_CUSTOM_FIELDS } : {}),
         ...(provider.secureCustomFields
           ? { secureCustomFields: provider.secureCustomFields }
           : {}),
@@ -391,7 +391,9 @@ function createCallbackController(provider: MockProvider) {
   };
 
   const controller = new NoAuthIntegrationsController(
-    createManager({ max: provider }) as unknown as IntegrationManager,
+    createManager({
+      [provider.identifier]: provider,
+    }) as unknown as IntegrationManager,
     integrationService as unknown as IntegrationService,
     refreshIntegrationService as unknown as RefreshIntegrationService,
     organizationService as unknown as OrganizationService
@@ -430,6 +432,72 @@ describe('MAX secure custom-field transport contracts', () => {
         expect(metadata.secureCustomFields).toBeFalsy();
       }
     }
+  });
+
+  it('includes secure custom-field metadata on MAX rows in the authenticated integration list only', async () => {
+    const integrationService = {
+      getIntegrationsList: jest.fn(async () => [
+        {
+          id: 'max-row',
+          providerIdentifier: 'max',
+          name: 'MAX',
+          internalId: MAX_VALUES.chatId,
+          disabled: false,
+          picture: '',
+          inBetweenSteps: false,
+          refreshNeeded: false,
+          profile: 'MAX profile',
+          type: 'social',
+          postingTimes: '[]',
+          customer: null,
+          additionalSettings: '[]',
+        },
+        {
+          id: 'legacy-row',
+          providerIdentifier: 'legacy',
+          name: 'Legacy',
+          internalId: 'legacy-id',
+          disabled: false,
+          picture: '',
+          inBetweenSteps: false,
+          refreshNeeded: false,
+          profile: 'Legacy profile',
+          type: 'social',
+          postingTimes: '[]',
+          customer: null,
+          additionalSettings: '[]',
+        },
+      ]),
+    };
+    const controller = new IntegrationsController(
+      createManager({
+        max: createProvider(),
+        legacy: createProvider({
+          identifier: 'legacy',
+          secureCustomFields: false,
+        }),
+      }) as unknown as IntegrationManager,
+      integrationService as unknown as IntegrationService,
+      {} as unknown as PostsService,
+      {} as unknown as RefreshIntegrationService
+    );
+
+    const payload = await controller.getIntegrationList({
+      id: 'org-current',
+    } as Parameters<IntegrationsController['getIntegrationList']>[0]);
+
+    const max = payload.integrations.find(
+      (integration) => integration.identifier === 'max'
+    );
+    const legacy = payload.integrations.find(
+      (integration) => integration.identifier === 'legacy'
+    );
+    expect(max).toMatchObject({
+      identifier: 'max',
+      secureCustomFields: true,
+    });
+    expect(legacy).toBeDefined();
+    expect(legacy).not.toHaveProperty('secureCustomFields');
   });
 
   it('rejects staging credentials into a state owned by another organization before storing or logging secrets', async () => {
@@ -499,6 +567,47 @@ describe('MAX secure custom-field transport contracts', () => {
     } finally {
       await app.close();
     }
+  });
+
+  it('deletes legacy OAuth login state before provider authentication to preserve replay protection', async () => {
+    redis.seed({
+      'organization:legacy-oauth-state': 'org-current',
+      'login:legacy-oauth-state': 'pkce-verifier',
+    });
+    const provider = createProvider({
+      identifier: 'oauth',
+      secureCustomFields: false,
+      customFields: undefined,
+    });
+    provider.authenticate = createAuthenticateMock(async () => {
+      redis.operations.push({ op: 'authenticate' });
+      return {
+        accessToken: 'oauth-access-token',
+        refreshToken: 'oauth-refresh-token',
+        expiresIn: 3600,
+        id: 'oauth-channel',
+        name: 'OAuth channel',
+        picture: '',
+        username: 'oauth-channel',
+        additionalSettings: [],
+      };
+    });
+    const { controller } = createCallbackController(provider);
+
+    await expect(
+      controller.connectSocialMedia(
+        'oauth',
+        createCallbackBody({
+          state: 'legacy-oauth-state',
+          code: 'oauth-code',
+          timezone: '0',
+        })
+      )
+    ).resolves.toMatchObject({ id: 'integration-id' });
+
+    expect(redis.operationIndex('del', 'login:legacy-oauth-state')).toBeLessThan(
+      redis.operationIndex('authenticate')
+    );
   });
 
   it('stages allowed values under custom-fields:{state} with a 300 second TTL and returns no credentials', async () => {
