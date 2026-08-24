@@ -31,6 +31,7 @@ const BOT_AVATAR_URL = 'https://cdn.example.test/max/bot-avatar-small.png';
 const BOT_FULL_AVATAR_URL = 'https://cdn.example.test/max/bot-avatar-full.png';
 const SYNTHETIC_POST_ID = 'postiz-max-post-0001';
 const SYNTHETIC_TEXT = '<p>MAX publication fixture text.</p>';
+const SYNTHETIC_FORMATTED_TEXT = 'MAX publication fixture text.';
 const ERROR_RECONNECT_REQUIRED =
   'MAX authentication has expired, please reconnect the MAX channel.';
 const MiB = 1024 * 1024;
@@ -657,7 +658,7 @@ describe('MaxProvider publication contract', () => {
       expectMaxApiCall(request, `/messages?chat_id=${SYNTHETIC_CHAT_ID}`, 'POST');
       expect(headerValue(request.headers, 'Content-Type')).toBe('application/json');
       expect(await requestJson(request)).toEqual({
-        text: SYNTHETIC_TEXT,
+        text: SYNTHETIC_FORMATTED_TEXT,
         format: 'html',
         notify: true,
       });
@@ -682,6 +683,98 @@ describe('MaxProvider publication contract', () => {
     expect(calls).toHaveLength(1);
     expectNoTokenInUrls(calls);
     expectNoConsoleLeak();
+  });
+
+  it('sends formatted MAX HTML and keeps the request format as html', async () => {
+    const { provider } = providerWithFetchRecorder(async (request) => {
+      expectMaxApiCall(request, `/messages?chat_id=${SYNTHETIC_CHAT_ID}`, 'POST');
+      expect(await requestJson(request)).toEqual({
+        text: '<b>bold</b> <a href=\"https://x.ru/?a=1&amp;b=2\">link</a>',
+        format: 'html',
+        notify: true,
+      });
+      return jsonResponse(publicationFixture.sendMessage);
+    });
+
+    await provider.post(
+      SYNTHETIC_CHAT_ID,
+      SYNTHETIC_TOKEN,
+      [
+        maxPost({
+          message:
+            '<p><strong>bold</strong> <a target=\"_blank\" rel=\"noopener\" href=\"https://x.ru/?a=1&amp;b=2\">link</a></p>',
+        }),
+      ],
+      syntheticIntegration()
+    );
+  });
+
+  it('rejects 4001 visible characters before any outbound request', async () => {
+    const longText = 'x'.repeat(4001);
+    const { provider, calls } = providerWithFetchRecorder(throwUnexpectedRequest);
+
+    await expectPublicationRejectsWithoutLeaks(
+      provider.post(
+        SYNTHETIC_CHAT_ID,
+        SYNTHETIC_TOKEN,
+        [maxPost({ message: `<p>${longText}</p>` })],
+        syntheticIntegration()
+      ),
+      'MAX message exceeds the text limit. Limit: 4000, actual: 4001.',
+      [longText]
+    );
+    expect(calls).toHaveLength(0);
+    expect(mockedAxiosPost()).not.toHaveBeenCalled();
+  });
+
+  it('allows exactly 4000 visible characters', async () => {
+    const textAtLimit = 'x'.repeat(4000);
+    const { provider, calls } = providerWithFetchRecorder(async (request) => {
+      if (isMaxMessageRequest(request)) {
+        expect(await requestJson(request)).toEqual({
+          text: textAtLimit,
+          format: 'html',
+          notify: true,
+        });
+        return jsonResponse(publicationFixture.sendMessage);
+      }
+
+      throwUnexpectedRequest(request);
+    });
+
+    await provider.post(
+      SYNTHETIC_CHAT_ID,
+      SYNTHETIC_TOKEN,
+      [maxPost({ message: `<p>${textAtLimit}</p>` })],
+      syntheticIntegration()
+    );
+
+    expect(calls.map((call) => call.url)).toEqual([
+      `${MAX_API_BASE}/messages?chat_id=${SYNTHETIC_CHAT_ID}`,
+    ]);
+  });
+
+  it('rejects javascript links before allocating or uploading media and does not leak secrets', async () => {
+    const secretPostText = 'secret MAX post body';
+    const { provider, calls } = providerWithFetchRecorder(throwUnexpectedRequest);
+
+    await expectPublicationRejectsWithoutLeaks(
+      provider.post(
+        SYNTHETIC_CHAT_ID,
+        SYNTHETIC_TOKEN,
+        [
+          maxPost({
+            message: `<p><a href=\"javascript:alert(1)\">${secretPostText}</a></p>`,
+            media: [{ type: 'image', path: 'max-image-that-must-not-upload.png' }],
+          }),
+        ],
+        syntheticIntegration()
+      ),
+      'Unsupported MAX link protocol: javascript',
+      [secretPostText, 'javascript:alert(1)']
+    );
+    expect(calls).toHaveLength(0);
+    expect(mockedAxiosPost()).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -748,7 +841,7 @@ describe('MaxProvider publication contract', () => {
           publicationFixture.uploads.imageTwo.url,
         ]);
         expect(await requestJson(request)).toEqual({
-          text: SYNTHETIC_TEXT,
+          text: SYNTHETIC_FORMATTED_TEXT,
           format: 'html',
           notify: true,
           attachments: [
@@ -882,7 +975,7 @@ describe('MaxProvider publication contract', () => {
 
       if (isMaxMessageRequest(request)) {
         expect(await requestJson(request)).toEqual({
-          text: SYNTHETIC_TEXT,
+          text: SYNTHETIC_FORMATTED_TEXT,
           format: 'html',
           notify: true,
           attachments: [
@@ -934,7 +1027,7 @@ describe('MaxProvider publication contract', () => {
 
       if (isMaxMessageRequest(request)) {
         expect(await requestJson(request)).toEqual({
-          text: SYNTHETIC_TEXT,
+          text: SYNTHETIC_FORMATTED_TEXT,
           format: 'html',
           notify: true,
           attachments: [
@@ -987,7 +1080,7 @@ describe('MaxProvider publication contract', () => {
 
       if (isMaxMessageRequest(request)) {
         expect(await requestJson(request)).toEqual({
-          text: SYNTHETIC_TEXT,
+          text: SYNTHETIC_FORMATTED_TEXT,
           format: 'html',
           notify: true,
           attachments: [
@@ -1036,7 +1129,7 @@ describe('MaxProvider publication contract', () => {
 
       if (isMaxMessageRequest(request)) {
         expect(await requestJson(request)).toEqual({
-          text: SYNTHETIC_TEXT,
+          text: SYNTHETIC_FORMATTED_TEXT,
           format: 'html',
           notify: true,
           attachments: [

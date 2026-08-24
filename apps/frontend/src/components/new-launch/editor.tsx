@@ -63,11 +63,14 @@ import {
 } from '@gitroom/frontend/components/ui/icons';
 import { DelayComponent } from '@gitroom/frontend/components/new-launch/delay.component';
 import { telegramVisibleLength } from '@gitroom/nestjs-libraries/integrations/social/telegram.html';
+import { maxVisibleLength } from '@gitroom/nestjs-libraries/integrations/social/max.html';
 import {
   interlockExtensions,
   telegramExtensions,
 } from '@gitroom/frontend/components/new-launch/telegram.marks';
+import { maxExtensions } from '@gitroom/frontend/components/new-launch/max.marks';
 import { TelegramFormatButtons } from '@gitroom/frontend/components/new-launch/telegram.format.buttons';
+import { MaxFormatButtons } from '@gitroom/frontend/components/new-launch/max.format.buttons';
 
 const MAX_UPLOAD_SIZE = 1024 * 1024 * 1024; // 1 GB
 
@@ -633,18 +636,23 @@ export const Editor: FC<{
   });
 
   const isTelegram = identifier === 'telegram';
+  const isMax = identifier === 'max';
 
   const valueWithoutHtml = useMemo(() => {
     return stripHtmlValidation('normal', props.value || '', true);
   }, [props.value]);
 
-  const telegramChars = useMemo(() => {
-    if (!isTelegram) {
-      return 0;
+  const richChars = useMemo(() => {
+    if (isTelegram) {
+      return telegramVisibleLength(props.value || '');
     }
 
-    return telegramVisibleLength(props.value || '');
-  }, [isTelegram, props.value]);
+    if (isMax) {
+      return maxVisibleLength(props.value || '');
+    }
+
+    return 0;
+  }, [isTelegram, isMax, props.value]);
 
   const addText = useCallback(
     (emoji: string) => {
@@ -755,7 +763,7 @@ export const Editor: FC<{
                       isPicture={pictures?.length > 0}
                       chars={chars}
                       totalChars={
-                        isTelegram ? telegramChars : valueWithoutHtml.length
+                        isTelegram || isMax ? richChars : valueWithoutHtml.length
                       }
                       totalAllowedChars={props.totalChars}
                       text={valueWithoutHtml}
@@ -769,15 +777,20 @@ export const Editor: FC<{
                           <UText
                             editor={editorRef?.current?.editor}
                             currentValue={props.value!}
-                            allowCombined={isTelegram}
+                            allowCombined={isTelegram || isMax}
                           />
                           <BoldText
                             editor={editorRef?.current?.editor}
                             currentValue={props.value!}
-                            allowCombined={isTelegram}
+                            allowCombined={isTelegram || isMax}
                           />
                           {isTelegram && (
                             <TelegramFormatButtons
+                              editor={editorRef?.current?.editor}
+                            />
+                          )}
+                          {isMax && (
+                            <MaxFormatButtons
                               editor={editorRef?.current?.editor}
                             />
                           )}
@@ -865,6 +878,7 @@ export const OnlyEditor = forwardRef<
   const t = useT();
   const fetch = useFetch();
   const isTelegram = identifier === 'telegram';
+  const isMax = identifier === 'max';
 
   const { internal } = useLaunchStore(
     useShallow((state) => ({
@@ -909,7 +923,11 @@ export const OnlyEditor = forwardRef<
       Text,
       Underline,
       Bold,
-      ...(isTelegram ? telegramExtensions() : interlockExtensions()),
+      ...(isTelegram
+        ? telegramExtensions()
+        : isMax
+          ? maxExtensions()
+          : interlockExtensions()),
       BulletList,
       ListItem,
       Placeholder.configure({

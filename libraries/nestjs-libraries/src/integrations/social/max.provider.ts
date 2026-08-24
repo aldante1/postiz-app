@@ -4,6 +4,7 @@ import {
   PostResponse,
   SocialProvider,
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
+import { MAX_TEXT_LIMIT } from '@gitroom/helpers/utils/max.limits';
 import {
   BadBody,
   SocialAbstract,
@@ -16,6 +17,7 @@ import axios from 'axios';
 import FormDataUpload from 'form-data';
 import net from 'node:net';
 import { getMaxDispatcher, getMaxHttpsAgent } from './max.tls';
+import { MaxFormatError, MaxHtml, maxVisibleLength, toMaxHtml } from './max.html';
 
 const MAX_API_BASE = 'https://platform-api2.max.ru';
 const MAX_INT64_MIN_ABS = '9223372036854775808';
@@ -57,6 +59,7 @@ const ERROR_INVALID_MESSAGE_RESPONSE =
 const ERROR_INVALID_UPLOAD_RESPONSE =
   'MAX media upload did not return a valid upload response.';
 const ERROR_INVALID_UPLOAD_URL = 'MAX media upload URL must be public HTTPS.';
+const ERROR_MESSAGE_TOO_LONG = 'MAX message exceeds the text limit.';
 
 type MaxCredentials = {
   token: string;
@@ -118,13 +121,16 @@ export class MaxProvider extends SocialAbstract implements SocialProvider {
   identifier = 'max';
   name = 'MAX';
   editor = 'html' as const;
+  rawEditorContent = true;
+  visibleLength = (content: string) => maxVisibleLength(content);
   isBetweenSteps = false;
   scopes = [] as string[];
   override maxConcurrentJob = 1;
   secureCustomFields = true;
 
-  maxLength() {
-    return 4000;
+  maxLength(_additionalSettings?: unknown, _hasMedia?: boolean) {
+    // У MAX нет отдельного caption для медиа: всегда действует один лимит text.
+    return MAX_TEXT_LIMIT;
   }
 
   async generateAuthUrl() {
@@ -246,6 +252,17 @@ export class MaxProvider extends SocialAbstract implements SocialProvider {
     }
 
     const [firstPost] = postDetails;
+    // Формат и длину проверяем до медиа, чтобы не загружать вложения для заведомо отклонённого текста.
+    const { html, length } = this.formatMessage(firstPost.message || '');
+    if (length > MAX_TEXT_LIMIT) {
+      throw new BadBody(
+        this.identifier,
+        '{}',
+        '{}',
+        this.lengthError(MAX_TEXT_LIMIT, length)
+      );
+    }
+
     const media = await this.validateMedia(firstPost.media || []);
 
     const attachments: MaxAttachment[] = [];
@@ -259,7 +276,7 @@ export class MaxProvider extends SocialAbstract implements SocialProvider {
       notify: true;
       attachments?: MaxAttachment[];
     } = {
-      text: firstPost.message,
+      text: html,
       format: 'html',
       notify: true,
     };
@@ -300,6 +317,22 @@ export class MaxProvider extends SocialAbstract implements SocialProvider {
         status: 'completed',
       },
     ];
+  }
+
+  private formatMessage(editorHtml: string): MaxHtml {
+    try {
+      return toMaxHtml(editorHtml);
+    } catch (error: unknown) {
+      if (error instanceof MaxFormatError) {
+        throw new BadBody(this.identifier, '{}', '{}', error.message);
+      }
+
+      throw error;
+    }
+  }
+
+  private lengthError(limit: number, length: number): string {
+    return `${ERROR_MESSAGE_TOO_LONG} Limit: ${limit}, actual: ${length}.`;
   }
 
   private async validateMedia(

@@ -4,7 +4,10 @@ const { compilerOptions } = require('./tsconfig.base.json');
 module.exports = {
   testEnvironment: 'node',
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json'],
-  testMatch: ['<rootDir>/libraries/nestjs-libraries/src/integrations/social/max.provider.spec.ts'],
+  testMatch: [
+    '<rootDir>/libraries/nestjs-libraries/src/integrations/social/max.provider.spec.ts',
+    '<rootDir>/libraries/nestjs-libraries/src/integrations/social/max.html.spec.ts',
+  ],
   transform: {
     '^.+\\.tsx?$': [
       'ts-jest',

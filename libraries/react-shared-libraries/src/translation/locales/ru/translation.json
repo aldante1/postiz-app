@@ -730,5 +730,19 @@
   "yes_cancel_coupon": "Да, отменить купон",
   "cancel_coupon_title": "Отменить купон?",
   "cancel_coupon_failed": "Не удалось отменить купон",
-  "cancel_coupon_success": "Купон отменён"
+  "cancel_coupon_success": "Купон отменён",
+  "format_bold": "Жирный",
+  "format_underline": "Подчёркнутый",
+  "format_italic": "Курсив",
+  "format_strikethrough": "Зачёркнутый",
+  "format_inline_code": "Код в строке",
+  "format_code_block": "Блок кода",
+  "format_quote": "Цитата",
+  "format_expandable_quote": "Сворачиваемая цитата",
+  "format_spoiler": "Спойлер",
+  "format_highlight": "Выделение",
+  "format_link": "Ссылка",
+  "format_bullets": "Список",
+  "format_title": "Заголовок",
+  "format_add_signature": "Добавить подпись"
 }

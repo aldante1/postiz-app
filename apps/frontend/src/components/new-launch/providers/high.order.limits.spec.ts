@@ -6,6 +6,7 @@ import {
   TELEGRAM_TEXT_LIMIT,
   telegramLimit,
 } from '@gitroom/helpers/utils/telegram.limits';
+import { MAX_TEXT_LIMIT } from '@gitroom/helpers/utils/max.limits';
 import { resolveMaxCharacters } from './max.characters';
 
 describe('resolveMaxCharacters', () => {
@@ -25,6 +26,11 @@ describe('resolveMaxCharacters', () => {
 
     expect(resolveMaxCharacters(limit, [], false)).toBe(4096);
     expect(resolveMaxCharacters(limit, [], true)).toBe(1024);
+  });
+
+  it('keeps MAX text limit independent of media presence', () => {
+    expect(resolveMaxCharacters(MAX_TEXT_LIMIT, [], false)).toBe(4000);
+    expect(resolveMaxCharacters(MAX_TEXT_LIMIT, [], true)).toBe(4000);
   });
 
   it('passes settings to a dynamic limit as the first argument', () => {
