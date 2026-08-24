@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { Readable } from 'stream';
 import axios from 'axios';
 import FormDataUpload from 'form-data';
 import type { Integration } from '@prisma/client';
@@ -77,6 +78,11 @@ type MaxProviderContract = {
 
 type ImageDimensionProbe = {
   getImageDimensions(path: string): Promise<{ width: number; height: number }>;
+};
+
+type MediaStreamProbe = {
+  mediaSize(path: string, identifier?: string): Promise<number>;
+  mediaStream(path: string, identifier?: string): Promise<NodeJS.ReadableStream>;
 };
 
 type MaxPublicationFixture = {
@@ -533,6 +539,45 @@ describe('MaxProvider publication contract', () => {
     expectNoConsoleLeak();
   });
 
+  it.each([
+    { name: 'omits URL', messageUrl: undefined },
+    { name: 'returns null URL', messageUrl: null },
+  ])(
+    'returns an empty releaseURL when MAX accepts a message but $name',
+    async ({ messageUrl }) => {
+      const { provider } = providerWithFetchRecorder(async (request) => {
+        if (isMaxMessageRequest(request)) {
+          const message: { body: { mid: string }; url?: null } = {
+            body: { mid: publicationFixture.sendMessage.message.body.mid },
+          };
+          if (messageUrl === null) {
+            message.url = null;
+          }
+
+          return jsonResponse({ message });
+        }
+
+        throwUnexpectedRequest(request);
+      });
+
+      const result = await provider.post(
+        SYNTHETIC_CHAT_ID,
+        SYNTHETIC_TOKEN,
+        [maxPost()],
+        syntheticIntegration()
+      );
+
+      expect(result).toEqual([
+        {
+          id: SYNTHETIC_POST_ID,
+          postId: publicationFixture.sendMessage.message.body.mid,
+          releaseURL: '',
+          status: 'completed',
+        },
+      ]);
+    }
+  );
+
   it('allocates two images separately, uploads them sequentially via axios FormData, and preserves attachment order', async () => {
     const imageOneContent = Buffer.concat([tinyPng(), Buffer.from('image-one')]);
     const imageTwoContent = Buffer.concat([tinyPng(), Buffer.from('image-two')]);
@@ -676,6 +721,60 @@ describe('MaxProvider publication contract', () => {
     expectNoTokenInUrls(calls);
   });
 
+  it('treats an mp4 path marked as image by updateMedia as video without probing image dimensions', async () => {
+    const videoPath = createSparseMediaFile(
+      'max-update-media-synthetic-image.mp4',
+      50 * MiB + 1
+    );
+    forbidEagerFileReads(videoPath);
+    const { provider, calls } = providerWithFetchRecorder(async (request) => {
+      if (isMaxUploadAllocation(request, 'video')) {
+        return jsonResponse({
+          url: publicationFixture.uploads.video.url,
+          token: publicationFixture.uploads.video.token,
+        });
+      }
+
+      if (isMaxMessageRequest(request)) {
+        expect(await requestJson(request)).toEqual({
+          text: SYNTHETIC_TEXT,
+          format: 'html',
+          notify: true,
+          attachments: [
+            {
+              type: 'video',
+              payload: { token: publicationFixture.uploads.video.token },
+            },
+          ],
+        });
+        return jsonResponse(publicationFixture.sendMessage);
+      }
+
+      throwUnexpectedRequest(request);
+    });
+    const dimensionSpy = jest
+      .spyOn(provider as unknown as ImageDimensionProbe, 'getImageDimensions')
+      .mockRejectedValue(new Error('MAX mp4 media must not run image dimensions'));
+    mockedAxiosPost().mockImplementation(async (url, form, config) => {
+      const stream = expectAxiosUpload(url, form, config);
+      destroyNodeStream(stream);
+      return axiosResponse({ retval: publicationFixture.uploads.video.retval });
+    });
+
+    await provider.post(
+      SYNTHETIC_CHAT_ID,
+      SYNTHETIC_TOKEN,
+      [maxPost({ media: [{ type: 'image', path: videoPath }] })],
+      syntheticIntegration()
+    );
+
+    expect(calls.map((call) => call.url)).toEqual([
+      `${MAX_API_BASE}/uploads?type=video`,
+      `${MAX_API_BASE}/messages?chat_id=${SYNTHETIC_CHAT_ID}`,
+    ]);
+    expect(dimensionSpy).not.toHaveBeenCalled();
+  });
+
   it('uses the upload response token when allocation and upload both provide different video tokens', async () => {
     const videoPath = createTempMediaFile(
       'max-video-upload-token.mp4',
@@ -783,6 +882,60 @@ describe('MaxProvider publication contract', () => {
     expect(mockedAxiosPost()).toHaveBeenCalledTimes(2);
     expect(forms[0]).not.toBe(forms[1]);
     expect(streams[0]).not.toBe(streams[1]);
+  });
+
+  it('streams remote media with a basename filename and known multipart length', async () => {
+    const remotePath =
+      'https://media.example.test/postiz/max/remote-video.mp4?signature=synthetic';
+    const remoteContent = Buffer.from('synthetic remote max video bytes\n');
+    const { provider, calls } = providerWithFetchRecorder(async (request) => {
+      if (isMaxUploadAllocation(request, 'video')) {
+        return jsonResponse({
+          url: publicationFixture.uploads.video.url,
+          token: publicationFixture.uploads.video.token,
+        });
+      }
+
+      if (isMaxMessageRequest(request)) {
+        return jsonResponse(publicationFixture.sendMessage);
+      }
+
+      throwUnexpectedRequest(request);
+    });
+    const mediaProbe = provider as unknown as MediaStreamProbe;
+    const mediaSizeSpy = jest
+      .spyOn(mediaProbe, 'mediaSize')
+      .mockResolvedValue(remoteContent.length);
+    const mediaStreamSpy = jest
+      .spyOn(mediaProbe, 'mediaStream')
+      .mockImplementation(async () => Readable.from(remoteContent));
+    mockedAxiosPost().mockImplementation(async (url, form, config) => {
+      expect(String(url)).toBe(publicationFixture.uploads.video.url);
+      expect(form).toBeInstanceOf(FormDataUpload);
+      const uploadForm = form as FormDataUpload;
+      expect(uploadForm.hasKnownLength()).toBe(true);
+      expect(uploadForm.getLengthSync()).toBeGreaterThan(remoteContent.length);
+      expect(multipartHeaderForField(form, 'data')).toContain(
+        'filename=\"remote-video.mp4\"'
+      );
+      const stream = expectAxiosUpload(url, form, config);
+      expect(await readNodeReadable(stream)).toEqual(remoteContent);
+      return axiosResponse({ token: publicationFixture.uploads.video.token });
+    });
+
+    await provider.post(
+      SYNTHETIC_CHAT_ID,
+      SYNTHETIC_TOKEN,
+      [maxPost({ media: [{ type: 'image', path: remotePath }] })],
+      syntheticIntegration()
+    );
+
+    expect(mediaSizeSpy).toHaveBeenCalledWith(remotePath, 'max');
+    expect(mediaStreamSpy).toHaveBeenCalledWith(remotePath, 'max');
+    expect(calls.map((call) => call.url)).toEqual([
+      `${MAX_API_BASE}/uploads?type=video`,
+      `${MAX_API_BASE}/messages?chat_id=${SYNTHETIC_CHAT_ID}`,
+    ]);
   });
 
   it.each(['audio', 'file'] as const)(
@@ -914,6 +1067,54 @@ describe('MaxProvider publication contract', () => {
         syntheticIntegration()
       ),
       'MAX media upload did not return an attachment token.'
+    );
+    expect(calls.map((call) => call.url)).toEqual([
+      `${MAX_API_BASE}/uploads?type=video`,
+    ]);
+    expect(mockedAxiosPost()).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects string upload responses before falling back to the allocation token or creating a message', async () => {
+    const videoPath = createTempMediaFile(
+      'max-html-upload-response.mp4',
+      Buffer.from('synthetic html upload response video bytes\n')
+    );
+    const uploadHtml = '<html>synthetic upload host response</html>';
+    const { provider, calls } = providerWithFetchRecorder(async (request) => {
+      if (isMaxUploadAllocation(request, 'video')) {
+        return jsonResponse({
+          url: publicationFixture.uploads.video.url,
+          token: publicationFixture.uploads.video.token,
+        });
+      }
+
+      if (isMaxMessageRequest(request)) {
+        throw new Error('Message must not be created after an invalid upload body');
+      }
+
+      throwUnexpectedRequest(request);
+    });
+    mockedAxiosPost().mockImplementation(async (url, form, config) => {
+      const stream = expectAxiosUpload(url, form, config);
+      expect(await readNodeReadable(stream)).toEqual(
+        Buffer.from('synthetic html upload response video bytes\n')
+      );
+      return axiosResponse(uploadHtml);
+    });
+
+    await expectPublicationRejectsWithoutLeaks(
+      provider.post(
+        SYNTHETIC_CHAT_ID,
+        SYNTHETIC_TOKEN,
+        [maxPost({ media: [{ type: 'video', path: videoPath }] })],
+        syntheticIntegration()
+      ),
+      'MAX media upload did not return a valid upload response.',
+      [
+        publicationFixture.uploads.video.url,
+        publicationFixture.uploads.video.token,
+        uploadHtml,
+      ]
     );
     expect(calls.map((call) => call.url)).toEqual([
       `${MAX_API_BASE}/uploads?type=video`,
@@ -1091,8 +1292,11 @@ function mockImageDimensions(
 }
 
 function forbidEagerFileReads(mediaPath: string) {
-  const originalReadFileSync = fs.readFileSync.bind(fs);
-  jest.spyOn(fs, 'readFileSync').mockImplementation(
+  // readFileSync needs the runtime CommonJS fs module; promises is shared
+  // through the ESM import, so that spy can stay on fs.promises.
+  const runtimeFs = require('fs') as typeof fs;
+  const originalReadFileSync = runtimeFs.readFileSync.bind(runtimeFs);
+  jest.spyOn(runtimeFs, 'readFileSync').mockImplementation(
     ((file: fs.PathOrFileDescriptor, options?: unknown) => {
       if (pathMatchesFile(file, mediaPath)) {
         throw new Error('MAX media upload must stream the file instead of reading it eagerly');
@@ -1100,9 +1304,9 @@ function forbidEagerFileReads(mediaPath: string) {
 
       return originalReadFileSync(
         file,
-        options as Parameters<typeof fs.readFileSync>[1]
+        options as Parameters<typeof runtimeFs.readFileSync>[1]
       );
-    }) as unknown as typeof fs.readFileSync
+    }) as unknown as typeof runtimeFs.readFileSync
   );
 
   const originalReadFile = fs.promises.readFile.bind(fs.promises);
@@ -1161,6 +1365,7 @@ function expectAxiosUpload(
   expect(String(url)).toMatch(/^https:\/\/uploads\.example\.test\/max\//);
   expect(form).toBeInstanceOf(FormDataUpload);
   expect(uploadConfigHeader(config, 'Authorization')).toBeUndefined();
+  expect(uploadConfigMaxBodyLength(config)).toBe(Infinity);
   expect(uploadConfigHeader(config, 'authorization')).toBeUndefined();
   return expectNodeReadableMultipartField(form, 'data');
 }
@@ -1179,6 +1384,14 @@ function uploadConfigHeader(config: unknown, name: string): unknown {
   }
   const entries = Object.entries(headers);
   return entries.find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1];
+}
+
+function uploadConfigMaxBodyLength(config: unknown): unknown {
+  if (!config || typeof config !== 'object' || !('maxBodyLength' in config)) {
+    return undefined;
+  }
+
+  return config.maxBodyLength;
 }
 
 function isMaxUploadAllocation(request: RecordedFetchCall, type: 'image' | 'video') {
@@ -1253,6 +1466,21 @@ function multipartFieldValues(body: unknown, fieldName: string): unknown[] {
   throw new Error('Expected form-data multipart body with inspectable _streams');
 }
 
+function multipartHeaderForField(body: unknown, fieldName: string): string {
+  if (!isLegacyMultipartBody(body)) {
+    throw new Error('Expected form-data multipart body with inspectable _streams');
+  }
+
+  const header = body._streams.find(
+    (part) => typeof part === 'string' && part.includes(`name=\"${fieldName}\"`)
+  );
+  if (typeof header !== 'string') {
+    throw new Error(`Expected multipart field header for ${fieldName}`);
+  }
+
+  return header;
+}
+
 function isLegacyMultipartBody(body: unknown): body is { _streams: unknown[] } {
   if (!body || typeof body !== 'object') {
     return false;
@@ -1298,6 +1526,7 @@ function readNodeReadable(stream: NodeJS.ReadableStream): Promise<Buffer> {
       })
       .on('end', () => resolve(Buffer.concat(chunks)))
       .on('error', reject);
+    (stream as { resume?: () => void }).resume?.();
   });
 }
 
@@ -1310,7 +1539,8 @@ function destroyNodeStream(stream: NodeJS.ReadableStream) {
 
 async function expectPublicationRejectsWithoutLeaks(
   promise: Promise<unknown>,
-  message: string
+  message: string,
+  extraSecrets: string[] = []
 ) {
   let error: unknown;
   try {
@@ -1322,8 +1552,8 @@ async function expectPublicationRejectsWithoutLeaks(
   expect(error).toBeInstanceOf(Error);
   const thrown = error as Error;
   expect(thrown.message).toContain(message);
-  expectNoLeak(thrown);
-  expectNoConsoleLeak();
+  expectNoLeak(thrown, extraSecrets);
+  expectNoConsoleLeak(extraSecrets);
 }
 
 function expectNoTokenInUrls(calls: RecordedFetchCall[]) {

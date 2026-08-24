@@ -9,8 +9,11 @@ import {
   SocialAbstract,
 } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { getSsrfSafeDispatcher } from '@gitroom/nestjs-libraries/dtos/webhooks/ssrf.safe.dispatcher';
+import { hasExtension } from '@gitroom/helpers/utils/has.extension';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
 import { Integration } from '@prisma/client';
+import axios from 'axios';
+import FormDataUpload from 'form-data';
 
 const MAX_API_BASE = 'https://platform-api2.max.ru';
 const MAX_INT64_MIN_ABS = '9223372036854775808';
@@ -29,8 +32,28 @@ const ERROR_MISSING_WRITE_PERMISSION =
   'MAX bot administrator must have the write permission.';
 const ERROR_RECONNECT_REQUIRED =
   'MAX authentication has expired, please reconnect the MAX channel.';
-const ERROR_PUBLICATION_UNSUPPORTED =
-  'MAX publication is not implemented yet.';
+const MAX_IMAGE_SIZE_LIMIT = 50 * 1024 * 1024;
+const MAX_VIDEO_SIZE_LIMIT = 250 * 1024 * 1024;
+const MAX_IMAGE_DIMENSION_LIMIT = 7680;
+const ERROR_SINGLE_POST_REQUIRED =
+  'MAX supports publishing exactly one post at a time.';
+const ERROR_MISSING_BOT_TOKEN = 'MAX requires a bot token before publication.';
+const ERROR_UNSUPPORTED_MEDIA =
+  'MAX supports image and video attachments only.';
+const ERROR_IMAGE_TOO_LARGE =
+  'MAX image attachments must be 50 MiB or smaller.';
+const ERROR_IMAGE_DIMENSIONS_TOO_LARGE =
+  'MAX image attachments must be 7680x7680 px or smaller.';
+const ERROR_VIDEO_TOO_LARGE =
+  'MAX video attachments must be 250 MiB or smaller.';
+const ERROR_MISSING_UPLOAD_URL =
+  'MAX media upload allocation did not return an upload URL.';
+const ERROR_MISSING_ATTACHMENT_TOKEN =
+  'MAX media upload did not return an attachment token.';
+const ERROR_INVALID_MESSAGE_RESPONSE =
+  'MAX did not return a valid message response.';
+const ERROR_INVALID_UPLOAD_RESPONSE =
+  'MAX media upload did not return a valid upload response.';
 
 type MaxCredentials = {
   token: string;
@@ -56,6 +79,36 @@ type MaxChannel = {
 type MaxMembership = {
   is_admin?: boolean | null;
   permissions?: string[] | null;
+};
+
+type MaxMediaType = 'image' | 'video';
+
+type MaxUploadAllocationResponse = {
+  url?: string;
+  token?: string;
+};
+
+type MaxUploadResponse = {
+  token?: string;
+  retval?: unknown;
+};
+
+type MaxAttachment = {
+  type: MaxMediaType;
+  payload: { token: string };
+};
+
+type MaxValidatedMedia = {
+  media: NonNullable<PostDetails['media']>[number];
+  type: MaxMediaType;
+  size: number;
+};
+
+type MaxSendMessageResponse = {
+  message?: {
+    body?: { mid?: string | number };
+    url?: string | null;
+  };
 };
 
 export class MaxProvider extends SocialAbstract implements SocialProvider {
@@ -178,14 +231,194 @@ export class MaxProvider extends SocialAbstract implements SocialProvider {
     id: string,
     accessToken: string,
     postDetails: PostDetails[],
-    integration: Integration
+    _integration: Integration
   ): Promise<PostResponse[]> {
-    throw new BadBody(
-      this.identifier,
-      '{}',
-      '{}',
-      ERROR_PUBLICATION_UNSUPPORTED
+    if (postDetails.length !== 1) {
+      throw new BadBody(this.identifier, '{}', '{}', ERROR_SINGLE_POST_REQUIRED);
+    }
+
+    const botToken = accessToken.trim();
+    if (!botToken) {
+      throw new BadBody(this.identifier, '{}', '{}', ERROR_MISSING_BOT_TOKEN);
+    }
+
+    const [firstPost] = postDetails;
+    const media = await this.validateMedia(firstPost.media || []);
+
+    const attachments: MaxAttachment[] = [];
+    for (const item of media) {
+      attachments.push(await this.uploadMedia(item, botToken));
+    }
+
+    const body: {
+      text: string;
+      format: 'html';
+      notify: true;
+      attachments?: MaxAttachment[];
+    } = {
+      text: firstPost.message,
+      format: 'html',
+      notify: true,
+    };
+
+    if (attachments.length > 0) {
+      body.attachments = attachments;
+    }
+
+    const response = (await (
+      await this.fetch(
+        `${MAX_API_BASE}/messages?chat_id=${encodeURIComponent(id)}`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: botToken,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(body),
+        },
+        this.identifier
+      )
+    ).json()) as MaxSendMessageResponse;
+
+    const mid = response.message?.body?.mid;
+    const releaseURL =
+      typeof response.message?.url === 'string' ? response.message.url : '';
+    if (typeof mid !== 'string' && typeof mid !== 'number') {
+      throw new BadBody(this.identifier, '{}', '{}', ERROR_INVALID_MESSAGE_RESPONSE);
+    }
+
+    return [
+      {
+        id: firstPost.id,
+        postId: String(mid),
+        releaseURL,
+        status: 'completed',
+      },
+    ];
+  }
+
+  private async validateMedia(
+    media: NonNullable<PostDetails['media']>
+  ): Promise<MaxValidatedMedia[]> {
+    const validatedMedia: MaxValidatedMedia[] = [];
+    for (const item of media) {
+      const type = this.resolveMediaType(item);
+      if (!type) {
+        throw new BadBody(this.identifier, '{}', '{}', ERROR_UNSUPPORTED_MEDIA);
+      }
+
+      const size = await this.mediaSize(item.path, this.identifier);
+      if (type === 'image') {
+        if (size > MAX_IMAGE_SIZE_LIMIT) {
+          throw new BadBody(this.identifier, '{}', '{}', ERROR_IMAGE_TOO_LARGE);
+        }
+
+        const dimensions = await this.getImageDimensions(item.path);
+        if (
+          dimensions.width > MAX_IMAGE_DIMENSION_LIMIT ||
+          dimensions.height > MAX_IMAGE_DIMENSION_LIMIT
+        ) {
+          throw new BadBody(
+            this.identifier,
+            '{}',
+            '{}',
+            ERROR_IMAGE_DIMENSIONS_TOO_LARGE
+          );
+        }
+      } else if (size > MAX_VIDEO_SIZE_LIMIT) {
+        throw new BadBody(this.identifier, '{}', '{}', ERROR_VIDEO_TOO_LARGE);
+      }
+
+      validatedMedia.push({ media: item, type, size });
+    }
+
+    return validatedMedia;
+  }
+
+  private async uploadMedia(
+    item: MaxValidatedMedia,
+    botToken: string
+  ): Promise<MaxAttachment> {
+    const { media, type, size } = item;
+    const allocation = (await (
+      await this.fetch(
+        `${MAX_API_BASE}/uploads?type=${type}`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: botToken,
+          },
+        },
+        this.identifier
+      )
+    ).json()) as MaxUploadAllocationResponse;
+
+    const uploadUrl = allocation.url;
+    if (!uploadUrl) {
+      throw new BadBody(this.identifier, '{}', '{}', ERROR_MISSING_UPLOAD_URL);
+    }
+
+    const uploadResponse = await this.runStreamedUpload<MaxUploadResponse>(
+      async () => {
+        const stream = await this.mediaStream(media.path, this.identifier);
+        const form = new FormDataUpload();
+        form.append('data', stream, {
+          filename: this.mediaFilename(media.path),
+          knownLength: size,
+        });
+
+        const { data } = await axios.post(uploadUrl, form, {
+          headers: form.getHeaders(),
+          maxBodyLength: Infinity,
+        });
+
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+          throw new BadBody(
+            this.identifier,
+            '{}',
+            '{}',
+            ERROR_INVALID_UPLOAD_RESPONSE
+          );
+        }
+
+        return data as MaxUploadResponse;
+      },
+      this.identifier
     );
+
+    const token = uploadResponse?.token ?? allocation.token;
+    if (typeof token !== 'string' || token.length === 0) {
+      throw new BadBody(
+        this.identifier,
+        '{}',
+        '{}',
+        ERROR_MISSING_ATTACHMENT_TOKEN
+      );
+    }
+
+    return {
+      type,
+      payload: { token },
+    };
+  }
+
+  private resolveMediaType(
+    media: NonNullable<PostDetails['media']>[number]
+  ): MaxMediaType | undefined {
+    if (media.type === 'video') {
+      return 'video';
+    }
+
+    if (media.type === 'image') {
+      return hasExtension(media.path, 'mp4') ? 'video' : 'image';
+    }
+
+    return undefined;
+  }
+
+  private mediaFilename(mediaPath: string) {
+    const withoutQuery = mediaPath.split('?')[0];
+    return withoutQuery.split('/').pop() || 'media';
   }
 
   private parseCredentials(code: string): MaxCredentials | string {
