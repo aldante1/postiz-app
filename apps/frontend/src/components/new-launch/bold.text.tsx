@@ -70,12 +70,25 @@ const originalMap = {
 const reverseMap = Object.fromEntries(
   Object.entries(originalMap).map(([key, value]) => [value, key])
 );
+
+type TipTapBoldEditor = {
+  commands?: {
+    unsetUnderline?: () => unknown;
+    toggleBold?: () => unknown;
+    focus?: () => unknown;
+  };
+};
+
 export const BoldText: FC<{
-  editor: any;
+  editor?: TipTapBoldEditor;
   currentValue: string;
-}> = ({ editor }) => {
+  allowCombined?: boolean;
+}> = ({ editor, allowCombined = false }) => {
   const mark = () => {
-    editor?.commands?.unsetUnderline();
+    if (!allowCombined) {
+      editor?.commands?.unsetUnderline();
+    }
+
     editor?.commands?.toggleBold();
     editor?.commands?.focus();
   };

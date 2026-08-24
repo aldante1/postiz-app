@@ -5,6 +5,7 @@ import { FormProvider, useForm, useWatch } from 'react-hook-form';
 import { classValidatorResolver } from '@hookform/resolvers/class-validator';
 import { Providers } from '@gitroom/frontend/components/new-launch/providers/show.all.providers';
 import { getProviderSettingsMeta } from '@gitroom/frontend/components/new-launch/providers/high.order.provider';
+import { resolveMaxCharacters } from '@gitroom/frontend/components/new-launch/providers/max.characters';
 import {
   IntegrationContext,
   type IntegrationContextType,
@@ -159,16 +160,20 @@ export const ProviderPreviewComponent: FC<ProviderPreviewProps> = ({
     controlRef.current = {
       getValues: () => form.getValues() as Record<string, unknown>,
       getMaximumCharacters: () => {
-        const max = meta?.maximumCharacters;
-        if (typeof max === 'number') return max;
-        if (typeof max === 'function') {
-          try {
-            return max(resolveAdditionalSettings());
-          } catch {
-            return null;
-          }
+        try {
+          // `posts[0]` — вложения основного сообщения: у Telegram лимит caption
+          // отличается от текстового, поэтому media участвует в расчёте.
+          const hasMedia = (posts?.[0]?.length ?? 0) > 0;
+          return (
+            resolveMaxCharacters(
+              meta?.maximumCharacters,
+              resolveAdditionalSettings(),
+              hasMedia
+            ) ?? null
+          );
+        } catch {
+          return null;
         }
-        return null;
       },
       validate: async () => {
         const formValid = await form.trigger(undefined, { shouldFocus: false });

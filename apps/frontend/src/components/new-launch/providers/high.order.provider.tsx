@@ -37,6 +37,13 @@ interface CharacterCondition {
   maximumCharacters: number;
 }
 
+import {
+  MaximumCharacters,
+  resolveMaxCharacters,
+} from '@gitroom/frontend/components/new-launch/providers/max.characters';
+
+export { resolveMaxCharacters };
+
 export const withProvider = function <T extends object>(params: {
   comments?: boolean | 'no-media';
   postComment: PostComment;
@@ -48,7 +55,7 @@ export const withProvider = function <T extends object>(params: {
     maximumCharacters?: number;
   }>;
   dto?: any;
-  maximumCharacters?: number | ((settings: any) => number);
+  maximumCharacters?: MaximumCharacters;
 }) {
   const {
     postComment,
@@ -104,21 +111,23 @@ export const withProvider = function <T extends object>(params: {
       }))
     );
 
+    const hasMedia =
+      ((internal?.integrationValue ?? global)[0]?.media?.length ?? 0) > 0;
+    const getMaximumCharacters = () =>
+      resolveMaxCharacters(
+        maximumCharacters,
+        JSON.parse(selectedIntegration.integration.additionalSettings || '[]'),
+        hasMedia
+      );
+
     useEffect(() => {
       if (!setTotalChars) {
         return;
       }
 
-      setChars(
-        props.id,
-        typeof maximumCharacters === 'number'
-          ? maximumCharacters
-          : maximumCharacters(
-              JSON.parse(
-                selectedIntegration.integration.additionalSettings || '[]'
-              )
-            )
-      );
+      const resolvedMaximumCharacters = getMaximumCharacters();
+
+      setChars(props.id, resolvedMaximumCharacters);
 
       if (isGlobal) {
         setComments(true);
@@ -133,17 +142,9 @@ export const withProvider = function <T extends object>(params: {
         );
         setEditor(selectedIntegration?.integration.editor);
         setPostComment(postComment);
-        setTotalChars(
-          typeof maximumCharacters === 'number'
-            ? maximumCharacters
-            : maximumCharacters(
-                JSON.parse(
-                  selectedIntegration.integration.additionalSettings || '[]'
-                )
-              )
-        );
+        setTotalChars(resolvedMaximumCharacters);
       }
-    }, [justCurrent, current, isGlobal, setTotalChars]);
+    }, [justCurrent, current, isGlobal, setTotalChars, hasMedia]);
 
     const getInternalPlugs = useCallback(async () => {
       return (
@@ -191,14 +192,7 @@ export const withProvider = function <T extends object>(params: {
             err: form.formState.errors,
             settings,
             values: value,
-            maximumCharacters:
-              typeof maximumCharacters === 'number'
-                ? maximumCharacters
-                : maximumCharacters(
-                    JSON.parse(
-                      selectedIntegration.integration.additionalSettings || '[]'
-                    )
-                  ),
+            maximumCharacters: getMaximumCharacters(),
             fix: () => {
               setCurrent(props.id);
               setHide(true);
@@ -261,29 +255,11 @@ export const withProvider = function <T extends object>(params: {
               !!value?.[0]?.content?.length &&
               (CustomPreviewComponent ? (
                 <CustomPreviewComponent
-                  maximumCharacters={
-                    typeof maximumCharacters === 'number'
-                      ? maximumCharacters
-                      : maximumCharacters(
-                          JSON.parse(
-                            selectedIntegration.integration
-                              .additionalSettings || '[]'
-                          )
-                        )
-                  }
+                  maximumCharacters={getMaximumCharacters()}
                 />
               ) : (
                 <GeneralPreviewComponent
-                  maximumCharacters={
-                    typeof maximumCharacters === 'number'
-                      ? maximumCharacters
-                      : maximumCharacters(
-                          JSON.parse(
-                            selectedIntegration.integration
-                              .additionalSettings || '[]'
-                          )
-                        )
-                  }
+                  maximumCharacters={getMaximumCharacters()}
                 />
               ))}
             {(SettingsComponent || !!data?.internalPlugs?.length) &&
@@ -356,7 +332,7 @@ export const getProviderSettingsMeta = (component: unknown) => {
         CustomPreviewComponent?: FC<{ maximumCharacters?: number }>;
         dto?: any;
         postComment: PostComment;
-        maximumCharacters?: number | ((settings: any) => number);
+        maximumCharacters?: MaximumCharacters;
       }
     | undefined;
 };

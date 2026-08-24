@@ -10,7 +10,6 @@ import {
   NotificationType,
 } from '@gitroom/nestjs-libraries/database/prisma/notifications/notification.service';
 import { Integration, Post, State } from '@prisma/client';
-import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
 import { IntegrationManager } from '@gitroom/nestjs-libraries/integrations/integration.manager';
 import { AuthTokenDetails } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
@@ -24,6 +23,7 @@ import {
   postId as postIdSearchParam,
 } from '@gitroom/nestjs-libraries/temporal/temporal.search.attribute';
 import { SubscriptionService } from '@gitroom/nestjs-libraries/database/prisma/subscriptions/subscription.service';
+import { buildProviderMessage } from './provider.message';
 
 // Drops fields the workflow and downstream activities never read — biggest wins are `error` (grows per retry) and `childrenPost` (Prisma side-loads it on every recursive row).
 function slimPost(post: any) {
@@ -185,14 +185,7 @@ export class PostActivity {
       await Promise.all(
         (newPosts || []).map(async (p) => ({
           id: p.id,
-          message: stripHtmlValidation(
-            getIntegration.editor,
-            p.content,
-            true,
-            false,
-            !/<\/?[a-z][\s\S]*>/i.test(p.content),
-            getIntegration.mentionFormat
-          ),
+          message: buildProviderMessage(getIntegration, p.content),
           settings: JSON.parse(p.settings || '{}'),
           media: await this._postService.updateMedia(
             p.id,
@@ -246,14 +239,7 @@ export class PostActivity {
     const mappedPosts = await Promise.all(
       (newPosts || []).map(async (p) => ({
         id: p.id,
-        message: stripHtmlValidation(
-          getIntegration.editor,
-          p.content,
-          true,
-          false,
-          !/<\/?[a-z][\s\S]*>/i.test(p.content),
-          getIntegration.mentionFormat
-        ),
+        message: buildProviderMessage(getIntegration, p.content),
         settings: JSON.parse(p.settings || '{}'),
         media: await this._postService.updateMedia(
           p.id,

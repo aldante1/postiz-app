@@ -168,7 +168,9 @@ export interface SocialProvider
   stripLinks?: () => boolean;
   refreshCron?: boolean;
   dto?: any;
-  maxLength: (additionalSettings?: any) => number;
+  // `hasMedia` lets a provider return a caption limit instead of a text limit
+  // (Telegram: 4096 text / 1024 caption). Providers that ignore it keep one limit.
+  maxLength: (additionalSettings?: any, hasMedia?: boolean) => number;
   checkValidity(
     posts: Array<{ path: string; thumbnail?: string }[]>,
     settings: any,
@@ -202,6 +204,12 @@ export interface SocialProvider
   toolTip?: string;
   oneTimeToken?: boolean;
   secureCustomFields?: boolean;
+  // Opt-in: the orchestrator hands this provider the raw editor HTML instead of
+  // running `stripHtmlValidation` first, making the provider the only sanitizer.
+  rawEditorContent?: boolean;
+  // Opt-in: provider-specific visible-text length used by post validation.
+  // Without it, validation keeps counting `stripHtmlValidation('normal', …)`.
+  visibleLength?: (content: string) => number;
   isBetweenSteps: boolean;
   scopes: string[];
   externalUrl?: (

@@ -88,8 +88,11 @@ export default withProvider({
   SettingsComponent: SettingsComponent,
   CustomPreviewComponent: undefined,
   dto: XDto,
-  maximumCharacters: (settings) => {
-    if (settings?.[0]?.value) {
+  // `settings` — распарсенный additionalSettings интеграции: premium-флаг лежит
+  // первым элементом. Лимит X от медиа не зависит.
+  maximumCharacters: (settings: unknown) => {
+    const [premium] = Array.isArray(settings) ? settings : [];
+    if (premium?.value) {
       return 4000;
     }
     return 280;

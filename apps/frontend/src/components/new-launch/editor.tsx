@@ -34,12 +34,7 @@ import { useDropzone } from 'react-dropzone';
 import { useUppyUploader } from '@gitroom/frontend/components/media/new.uploader';
 import { Dashboard } from '@uppy/react';
 import Link from '@tiptap/extension-link';
-import {
-  useEditor,
-  EditorContent,
-  Extension,
-  mergeAttributes,
-} from '@tiptap/react';
+import { useEditor, EditorContent, mergeAttributes } from '@tiptap/react';
 import Document from '@tiptap/extension-document';
 import Bold from '@tiptap/extension-bold';
 import Text from '@tiptap/extension-text';
@@ -67,36 +62,14 @@ import {
   DelayIcon,
 } from '@gitroom/frontend/components/ui/icons';
 import { DelayComponent } from '@gitroom/frontend/components/new-launch/delay.component';
+import { telegramVisibleLength } from '@gitroom/nestjs-libraries/integrations/social/telegram.html';
+import {
+  interlockExtensions,
+  telegramExtensions,
+} from '@gitroom/frontend/components/new-launch/telegram.marks';
+import { TelegramFormatButtons } from '@gitroom/frontend/components/new-launch/telegram.format.buttons';
 
 const MAX_UPLOAD_SIZE = 1024 * 1024 * 1024; // 1 GB
-
-const InterceptBoldShortcut = Extension.create({
-  name: 'preventBoldWithUnderline',
-
-  addKeyboardShortcuts() {
-    return {
-      'Mod-b': () => {
-        // For example, toggle bold while removing underline
-        this?.editor?.commands?.unsetUnderline();
-        return this?.editor?.commands?.toggleBold();
-      },
-    };
-  },
-});
-
-const InterceptUnderlineShortcut = Extension.create({
-  name: 'preventUnderlineWithUnderline',
-
-  addKeyboardShortcuts() {
-    return {
-      'Mod-u': () => {
-        // For example, toggle bold while removing underline
-        this?.editor?.commands?.unsetBold();
-        return this?.editor?.commands?.toggleUnderline();
-      },
-    };
-  },
-});
 
 export const EditorWrapper: FC<{
   totalPosts: number;
@@ -659,9 +632,19 @@ export const Editor: FC<{
     noDrag: num > 0 && comments === 'no-media',
   });
 
+  const isTelegram = identifier === 'telegram';
+
   const valueWithoutHtml = useMemo(() => {
     return stripHtmlValidation('normal', props.value || '', true);
   }, [props.value]);
+
+  const telegramChars = useMemo(() => {
+    if (!isTelegram) {
+      return 0;
+    }
+
+    return telegramVisibleLength(props.value || '');
+  }, [isTelegram, props.value]);
 
   const addText = useCallback(
     (emoji: string) => {
@@ -720,6 +703,7 @@ export const Editor: FC<{
                 onChange={props.onChange}
                 paste={paste}
                 ref={editorRef}
+                identifier={identifier}
               />
             </div>
             <div
@@ -770,7 +754,9 @@ export const Editor: FC<{
                     <InformationComponent
                       isPicture={pictures?.length > 0}
                       chars={chars}
-                      totalChars={valueWithoutHtml.length}
+                      totalChars={
+                        isTelegram ? telegramChars : valueWithoutHtml.length
+                      }
                       totalAllowedChars={props.totalChars}
                       text={valueWithoutHtml}
                     />
@@ -783,30 +769,40 @@ export const Editor: FC<{
                           <UText
                             editor={editorRef?.current?.editor}
                             currentValue={props.value!}
+                            allowCombined={isTelegram}
                           />
                           <BoldText
                             editor={editorRef?.current?.editor}
                             currentValue={props.value!}
+                            allowCombined={isTelegram}
                           />
+                          {isTelegram && (
+                            <TelegramFormatButtons
+                              editor={editorRef?.current?.editor}
+                            />
+                          )}
                         </>
                       )}
-                      {(editorType === 'markdown' || editorType === 'html') &&
-                        identifier !== 'telegram' && (
-                          <>
-                            <AComponent
-                              editor={editorRef?.current?.editor}
-                              currentValue={props.value!}
-                            />
-                            <Bullets
-                              editor={editorRef?.current?.editor}
-                              currentValue={props.value!}
-                            />
-                            <HeadingComponent
-                              editor={editorRef?.current?.editor}
-                              currentValue={props.value!}
-                            />
-                          </>
-                        )}
+                      {(editorType === 'markdown' || editorType === 'html') && (
+                        <>
+                          <AComponent
+                            editor={editorRef?.current?.editor}
+                            currentValue={props.value!}
+                          />
+                          {identifier !== 'telegram' && (
+                            <>
+                              <Bullets
+                                editor={editorRef?.current?.editor}
+                                currentValue={props.value!}
+                              />
+                              <HeadingComponent
+                                editor={editorRef?.current?.editor}
+                                currentValue={props.value!}
+                              />
+                            </>
+                          )}
+                        </>
+                      )}
                       <div
                         data-tooltip-id="tooltip"
                         data-tooltip-content={t('insert_emoji', 'Insert Emoji')}
@@ -863,10 +859,12 @@ export const OnlyEditor = forwardRef<
     value: string;
     onChange: (value: string) => void;
     paste?: (event: ClipboardEvent | File[]) => void;
+    identifier?: string;
   }
->(({ editorType, value, onChange, paste }, ref) => {
+>(({ editorType, value, onChange, paste, identifier }, ref) => {
   const t = useT();
   const fetch = useFetch();
+  const isTelegram = identifier === 'telegram';
 
   const { internal } = useLaunchStore(
     useShallow((state) => ({
@@ -911,8 +909,7 @@ export const OnlyEditor = forwardRef<
       Text,
       Underline,
       Bold,
-      InterceptBoldShortcut,
-      InterceptUnderlineShortcut,
+      ...(isTelegram ? telegramExtensions() : interlockExtensions()),
       BulletList,
       ListItem,
       Placeholder.configure({

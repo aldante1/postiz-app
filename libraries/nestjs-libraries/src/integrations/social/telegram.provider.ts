@@ -4,16 +4,69 @@ import {
   PostResponse,
   SocialProvider,
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
+import { telegramLimit } from '@gitroom/helpers/utils/telegram.limits';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
 import dayjs from 'dayjs';
-import { SocialAbstract } from '@gitroom/nestjs-libraries/integrations/social.abstract';
+import {
+  BadBody,
+  SocialAbstract,
+} from '@gitroom/nestjs-libraries/integrations/social.abstract';
 //@ts-ignore
 import mime from 'mime';
 import TelegramBot from 'node-telegram-bot-api';
 import { Integration } from '@prisma/client';
-import striptags from 'striptags';
+import { SocksProxyAgent } from 'socks-proxy-agent';
+import {
+  TelegramFormatError,
+  telegramVisibleLength,
+  toTelegramHtml,
+  type TelegramHtml,
+} from '@gitroom/nestjs-libraries/integrations/social/telegram.html';
 
-const telegramBot = new TelegramBot(process.env.TELEGRAM_TOKEN!);
+let cachedBot: TelegramBot | undefined;
+
+export const getTelegramBot = (): TelegramBot => {
+  if (cachedBot) {
+    return cachedBot;
+  }
+
+  const proxy = process.env.TELEGRAM_PROXY;
+  // node-telegram-bot-api типизирует `request` как OptionsWithUrl (url обязателен),
+  // хотя библиотека сама подставляет url и принимает один agent — так работает
+  // проверенный overlay-патч. Приводим точечно, не ослабляя остальные опции.
+  const proxyOptions = proxy
+    ? ({
+        request: { agent: new SocksProxyAgent(proxy) },
+      } as unknown as TelegramBot.ConstructorOptions)
+    : undefined;
+  cachedBot = proxyOptions
+    ? new TelegramBot(process.env.TELEGRAM_TOKEN!, proxyOptions)
+    : new TelegramBot(process.env.TELEGRAM_TOKEN!);
+
+  return cachedBot;
+};
+
+export const resetTelegramBot = (): void => {
+  cachedBot = undefined;
+};
+
+const ERROR_MESSAGE_TOO_LONG = 'Telegram message exceeds the text limit.';
+const ERROR_CAPTION_TOO_LONG = 'Telegram caption exceeds the media caption limit.';
+type ProcessedTelegramMedia = {
+  type: 'photo' | 'video' | 'document';
+  media: string;
+  fileOptions: {
+    filename?: string;
+    contentType: string;
+  };
+};
+
+type TelegramMediaGroupItem = {
+  type: 'photo' | 'video' | 'document';
+  media: string;
+  caption?: string;
+  parse_mode: 'HTML';
+};
 // Added to support local storage posting
 const frontendURL = process.env.FRONTEND_URL || 'http://localhost:5000';
 const mediaStorage = process.env.STORAGE_PROVIDER || 'local';
@@ -26,8 +79,10 @@ export class TelegramProvider extends SocialAbstract implements SocialProvider {
   isWeb3 = true;
   scopes = [] as string[];
   editor = 'html' as const;
-  maxLength() {
-    return 4096;
+  rawEditorContent = true;
+  visibleLength = (content: string) => telegramVisibleLength(content);
+  maxLength(_additionalSettings?: any, hasMedia?: boolean) {
+    return telegramLimit(!!hasMedia);
   }
 
   async refreshToken(refresh_token: string): Promise<AuthTokenDetails> {
@@ -56,7 +111,8 @@ export class TelegramProvider extends SocialAbstract implements SocialProvider {
     codeVerifier: string;
     refresh?: string;
   }) {
-    const chat = await telegramBot.getChat(params.code);
+    const bot = getTelegramBot();
+    const chat = await bot.getChat(params.code);
 
     console.log(JSON.stringify(chat));
     if (!chat?.id) {
@@ -65,7 +121,7 @@ export class TelegramProvider extends SocialAbstract implements SocialProvider {
 
     const photo = !chat?.photo?.big_file_id
       ? ''
-      : await telegramBot.getFileLink(chat.photo.big_file_id);
+      : await bot.getFileLink(chat.photo.big_file_id);
 
     // Modified id to work with chat.username (public groups/channels) or chat.id (private groups/channels) when chat.username is not available
     return {
@@ -81,7 +137,8 @@ export class TelegramProvider extends SocialAbstract implements SocialProvider {
 
   async getBotId(query: { id?: number; word: string }) {
     // Added allowed_updates Ensure only necessary updates are fetched
-    const res = await telegramBot.getUpdates({
+    const bot = getTelegramBot();
+    const res = await bot.getUpdates({
       ...(query.id ? { offset: query.id } : {}),
       allowed_updates: ['message', 'channel_post'],
     });
@@ -99,7 +156,7 @@ export class TelegramProvider extends SocialAbstract implements SocialProvider {
     // prevents the code from running while chatId is still undefined to avoid the error 'ETELEGRAM: 400 Bad Request: chat_id is empty'. the code would still work eventually but console spam is not pretty
     if (chatId) {
       //get the numberic ID of the bot
-      const botId = (await telegramBot.getMe()).id;
+      const botId = (await bot.getMe()).id;
       // check if the bot is an admin in the chat
       const isAdmin = await this.botIsAdmin(chatId, botId);
       // get the messageId of the message that triggered the connection
@@ -108,21 +165,21 @@ export class TelegramProvider extends SocialAbstract implements SocialProvider {
 
       if (!isAdmin) {
         // alternatively you can replace this with a console.log if you do not want to inform the user of the bot's admin status
-        telegramBot.sendMessage(
+        bot.sendMessage(
           chatId,
           "Connection Successful. I don't have admin privileges to delete these messages, please go ahead and remove them yourself."
         );
       } else {
         // Delete the message that triggered the connection
-        await telegramBot.deleteMessage(chatId, connectMessageId);
+        await bot.deleteMessage(chatId, connectMessageId);
         // Send success message to the chat
-        const successMessage = await telegramBot.sendMessage(
+        const successMessage = await bot.sendMessage(
           chatId,
           'Connection Successful. Message will be deleted in 10 seconds.'
         );
         // Delete the success message after 10 seconds
         setTimeout(async () => {
-          await telegramBot.deleteMessage(chatId, successMessage.message_id);
+          await bot.deleteMessage(chatId, successMessage.message_id);
           console.log('Success message deleted.');
         }, 10000);
       }
@@ -138,7 +195,7 @@ export class TelegramProvider extends SocialAbstract implements SocialProvider {
       : {};
   }
 
-  private processMedia(mediaFiles: PostDetails['media']) {
+  private processMedia(mediaFiles: PostDetails['media']): ProcessedTelegramMedia[] {
     return (mediaFiles || []).map((media) => {
       let mediaUrl = media.path;
       if (mediaStorage === 'local' && mediaUrl.startsWith(frontendURL)) {
@@ -175,17 +232,23 @@ export class TelegramProvider extends SocialAbstract implements SocialProvider {
   ): Promise<number | null> {
     let messageId: number | null = null;
     const mediaFiles = message.media || [];
-    const text = striptags(message.message || '', ['u', 'strong', 'p'])
-      .replace(/<strong>/g, '<b>')
-      .replace(/<\/strong>/g, '</b>')
-      .replace(/<p>(.*?)<\/p>/g, '$1\n');
-
-    console.log(text);
     const processedMedia = this.processMedia(mediaFiles);
+    const { html, length } = this.formatMessage(message.message || '');
+    const limit = telegramLimit(processedMedia.length > 0);
+    if (length > limit) {
+      throw new BadBody(
+        this.identifier,
+        '{}',
+        '{}',
+        this.lengthError(processedMedia.length > 0, limit, length)
+      );
+    }
+
+    const bot = getTelegramBot();
 
     // if there's no media, bot sends a text message only
     if (processedMedia.length === 0) {
-      const response = await telegramBot.sendMessage(accessToken, text, {
+      const response = await bot.sendMessage(accessToken, html, {
         parse_mode: 'HTML',
         ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {}),
       });
@@ -195,26 +258,26 @@ export class TelegramProvider extends SocialAbstract implements SocialProvider {
     else if (processedMedia.length === 1) {
       const media = processedMedia[0];
       const options = {
-        caption: text,
+        caption: html,
         parse_mode: 'HTML' as const,
         ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {}),
       };
       const response =
         media.type === 'video'
-          ? await telegramBot.sendVideo(
+          ? await bot.sendVideo(
               accessToken,
               media.media,
               options,
               media.fileOptions
             )
           : media.type === 'photo'
-          ? await telegramBot.sendPhoto(
+          ? await bot.sendPhoto(
               accessToken,
               media.media,
               options,
               media.fileOptions
             )
-          : await telegramBot.sendDocument(
+          : await bot.sendDocument(
               accessToken,
               media.media,
               options,
@@ -226,16 +289,20 @@ export class TelegramProvider extends SocialAbstract implements SocialProvider {
     else {
       const mediaGroups = this.chunkMedia(processedMedia, 10);
       for (let i = 0; i < mediaGroups.length; i++) {
-        const mediaGroup = mediaGroups[i].map((m, index) => ({
-          type: m.type === 'document' ? 'document' : m.type, // Documents are not allowed in media groups
-          media: m.media,
-          caption: i === 0 && index === 0 ? text : undefined,
-          parse_mode: 'HTML',
-        }));
+        const mediaGroup = mediaGroups[i].map(
+          (m, index): TelegramMediaGroupItem => ({
+            type: m.type === 'document' ? 'document' : m.type, // Documents are not allowed in media groups
+            media: m.media,
+            caption: i === 0 && index === 0 ? html : undefined,
+            parse_mode: 'HTML',
+          })
+        );
 
-        const response = await telegramBot.sendMediaGroup(
+        // node-telegram-bot-api types only list photo/video, while this provider
+        // preserves the existing document media-group runtime branch.
+        const response = await bot.sendMediaGroup(
           accessToken,
-          mediaGroup as any[],
+          mediaGroup as unknown as TelegramBot.InputMedia[],
           {
             ...(replyToMessageId && i === 0
               ? { reply_to_message_id: replyToMessageId }
@@ -249,6 +316,24 @@ export class TelegramProvider extends SocialAbstract implements SocialProvider {
     }
 
     return messageId;
+  }
+
+  private formatMessage(editorHtml: string): TelegramHtml {
+    try {
+      return toTelegramHtml(editorHtml);
+    } catch (error: unknown) {
+      if (error instanceof TelegramFormatError) {
+        throw new BadBody(this.identifier, '{}', '{}', error.message);
+      }
+
+      throw error;
+    }
+  }
+
+  private lengthError(hasMedia: boolean, limit: number, length: number): string {
+    const prefix = hasMedia ? ERROR_CAPTION_TOO_LONG : ERROR_MESSAGE_TOO_LONG;
+
+    return `${prefix} Limit: ${limit}, actual: ${length}.`;
   }
 
   async post(
@@ -307,7 +392,7 @@ export class TelegramProvider extends SocialAbstract implements SocialProvider {
     return [];
   }
   // chunkMedia is used to split media into groups of "size". 10 is used here because telegram api allows a maximum of 10 media per group
-  private chunkMedia(media: { type: string; media: string }[], size: number) {
+  private chunkMedia(media: ProcessedTelegramMedia[], size: number) {
     const result = [];
     for (let i = 0; i < media.length; i += size) {
       result.push(media.slice(i, i + size));
@@ -317,7 +402,7 @@ export class TelegramProvider extends SocialAbstract implements SocialProvider {
 
   async botIsAdmin(chatId: number, botId: number): Promise<boolean> {
     try {
-      const chatMember = await telegramBot.getChatMember(chatId, botId);
+      const chatMember = await getTelegramBot().getChatMember(chatId, botId);
 
       if (
         chatMember.status === 'administrator' ||

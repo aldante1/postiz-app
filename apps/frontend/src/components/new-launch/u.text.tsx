@@ -70,12 +70,25 @@ const underlineMap = {
 const reverseMap = Object.fromEntries(
   Object.entries(underlineMap).map(([key, value]) => [value, key])
 );
+
+type TipTapUnderlineEditor = {
+  commands?: {
+    unsetBold?: () => unknown;
+    toggleUnderline?: () => unknown;
+    focus?: () => unknown;
+  };
+};
+
 export const UText: FC<{
-  editor: any;
+  editor?: TipTapUnderlineEditor;
   currentValue: string;
-}> = ({ editor }) => {
+  allowCombined?: boolean;
+}> = ({ editor, allowCombined = false }) => {
   const mark = () => {
-    editor?.commands?.unsetBold();
+    if (!allowCombined) {
+      editor?.commands?.unsetBold();
+    }
+
     editor?.commands?.toggleUnderline();
     editor?.commands?.focus();
   };

@@ -51,8 +51,10 @@ import { hasExtension } from '@gitroom/helpers/utils/has.extension';
 import { stripLinks } from '@gitroom/helpers/utils/strip.links';
 import { validate } from 'class-validator';
 import { plainToInstance } from 'class-transformer';
-import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
-import { weightedLength } from '@gitroom/helpers/utils/count.length';
+import {
+  isTooLong,
+  providerVisibleLength,
+} from '@gitroom/nestjs-libraries/database/prisma/posts/post.limits';
 
 type PostWithConditionals = Post & {
   integration?: Integration;
@@ -829,17 +831,24 @@ export class PostsService {
         const isX = integration.providerIdentifier === 'x';
 
         const emptyContent = (post.value || []).some((a) => {
-          const strip = stripHtmlValidation('normal', a.content || '', true);
-          const length = isX ? weightedLength(strip) : strip.length;
-          return length === 0 && (a.image || []).length === 0;
+          const hasMedia = (a.image || []).length > 0;
+          const length = providerVisibleLength(
+            provider,
+            a.content || '',
+            isX
+          );
+          return length === 0 && !hasMedia;
         });
 
         const tooLong = (post.value || []).some((a) => {
-          const strip = stripHtmlValidation('normal', a.content || '', true);
-          const weighted = isX ? weightedLength(strip) : strip.length;
-          const totalCharacters =
-            weighted > strip.length ? weighted : strip.length;
-          return totalCharacters > (maximumCharacters || 1000000);
+          const hasMedia = (a.image || []).length > 0;
+          return isTooLong(
+            provider,
+            a.content || '',
+            hasMedia,
+            additionalSettings,
+            isX
+          );
         });
 
         return {
