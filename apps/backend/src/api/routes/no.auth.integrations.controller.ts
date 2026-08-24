@@ -25,10 +25,6 @@ import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integration
 import { OrganizationService } from '@gitroom/nestjs-libraries/database/prisma/organizations/organization.service';
 import { getSsrfSafeDispatcher } from '@gitroom/nestjs-libraries/dtos/webhooks/ssrf.safe.dispatcher';
 
-
-type RedisWithGetDel = typeof ioRedis & {
-  getdel(key: string): Promise<string | null>;
-};
 @ApiTags('Integrations')
 @Controller('/integrations')
 export class NoAuthIntegrationsController {
@@ -70,14 +66,13 @@ export class NoAuthIntegrationsController {
     const org = await this._organizationService.getOrgById(organization);
 
     let authCode = body.code;
-    if (integrationProvider.secureCustomFields) {
+    const isSecureCustomFields = !!integrationProvider.secureCustomFields;
+    if (isSecureCustomFields) {
       if (body.code !== 'staged') {
         throw new Error('Invalid staged credentials');
       }
 
-      const stagedValues = await (ioRedis as RedisWithGetDel).getdel(
-        `custom-fields:${body.state}`
-      );
+      const stagedValues = await ioRedis.getdel(`custom-fields:${body.state}`);
       if (!stagedValues) {
         throw new Error('Missing or expired staged credentials');
       }
@@ -98,6 +93,21 @@ export class NoAuthIntegrationsController {
 
     const refresh = await ioRedis.get(`refresh:${body.state}`);
     const onboarding = await ioRedis.get(`onboarding:${body.state}`);
+
+    if (!isSecureCustomFields) {
+      if (!integrationProvider.customFields) {
+        await ioRedis.del(`login:${body.state}`);
+      }
+      if (details) {
+        await ioRedis.del(`external:${body.state}`);
+      }
+      if (refresh) {
+        await ioRedis.del(`refresh:${body.state}`);
+      }
+      if (onboarding) {
+        await ioRedis.del(`onboarding:${body.state}`);
+      }
+    }
 
     const {
       error,
@@ -181,13 +191,15 @@ export class NoAuthIntegrationsController {
       }
     });
 
-    for (const key of [
-      `login:${body.state}`,
-      `external:${body.state}`,
-      `refresh:${body.state}`,
-      `onboarding:${body.state}`,
-    ]) {
-      await ioRedis.del(key);
+    if (isSecureCustomFields) {
+      for (const key of [
+        `login:${body.state}`,
+        `external:${body.state}`,
+        `refresh:${body.state}`,
+        `onboarding:${body.state}`,
+      ]) {
+        await ioRedis.del(key);
+      }
     }
 
     if (error) {

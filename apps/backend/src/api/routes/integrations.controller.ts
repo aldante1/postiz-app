@@ -110,6 +110,9 @@ export class IntegrationsController {
             editor: findIntegration.editor,
             stripLinks: !!findIntegration?.stripLinks?.(),
             picture: p.picture || '/no-picture.jpg',
+            ...(findIntegration.secureCustomFields
+              ? { secureCustomFields: findIntegration.secureCustomFields }
+              : {}),
             identifier: p.providerIdentifier,
             inBetweenSteps: p.inBetweenSteps,
             refreshNeeded: p.refreshNeeded,

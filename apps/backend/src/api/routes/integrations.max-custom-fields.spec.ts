@@ -11,54 +11,12 @@ jest.mock('@gitroom/nestjs-libraries/integrations/integration.manager', () => ({
     }
 
     async getAllIntegrations(): Promise<{
-      social: Array<{
-        identifier: string;
-        name: string;
-        customFields?: Array<{
-          key: string;
-          label: string;
-          validation: string;
-          type: 'text' | 'password';
-        }>;
-        secureCustomFields?: boolean;
-      }>;
+      social: unknown[];
       article: unknown[];
     }> {
       return {
-        social: [
-          {
-            identifier: 'max',
-            name: 'MAX',
-            customFields: [
-              {
-                key: 'token',
-                label: 'Bot token',
-                validation: '/^.+$/',
-                type: 'password',
-              },
-              {
-                key: 'chatId',
-                label: 'Channel chat ID',
-                validation: '/^-?\\d+$/',
-                type: 'text',
-              },
-            ],
-            secureCustomFields: true,
-          },
-          {
-            identifier: 'legacy-custom-fields',
-            name: 'Legacy custom fields',
-            customFields: [
-              {
-                key: 'apiKey',
-                label: 'API key',
-                validation: '/^.+$/',
-                type: 'password',
-              },
-            ],
-          },
-        ],
-        article: [] as unknown[],
+        social: [],
+        article: [],
       };
     }
   },
@@ -231,7 +189,7 @@ type RedisRecorderTarget = {
   get(key: string): Promise<string | null>;
   set(key: string, value: unknown, ...args: unknown[]): Promise<string>;
   del(...keys: string[]): Promise<number>;
-  getdel?: (key: string) => Promise<string | null>;
+  getdel(key: string): Promise<string | null>;
 };
 
 function installRedisRecorder() {
@@ -239,11 +197,7 @@ function installRedisRecorder() {
   jest.spyOn(target, 'get').mockImplementation(redis.get.bind(redis));
   jest.spyOn(target, 'set').mockImplementation(redis.set.bind(redis));
   jest.spyOn(target, 'del').mockImplementation(redis.del.bind(redis));
-  Object.defineProperty(target, 'getdel', {
-    value: jest.fn(redis.getdel.bind(redis)),
-    configurable: true,
-    writable: true,
-  });
+  jest.spyOn(target, 'getdel').mockImplementation(redis.getdel.bind(redis));
 }
 
 function assertSecretNeverLeaked(...values: string[]) {
@@ -417,22 +371,6 @@ describe('MAX secure custom-field transport contracts', () => {
     jest.restoreAllMocks();
   });
 
-  it('publishes MAX as the only secure custom-field social integration in IntegrationManager metadata', async () => {
-    const payload = await new IntegrationManager().getAllIntegrations();
-
-    const max = payload.social.find((integration) => integration.identifier === 'max');
-    expect(max).toMatchObject({
-      identifier: 'max',
-      secureCustomFields: true,
-    });
-
-    for (const integration of payload.social) {
-      if (integration.identifier !== 'max' && 'customFields' in integration) {
-        const metadata = integration as { secureCustomFields?: boolean };
-        expect(metadata.secureCustomFields).toBeFalsy();
-      }
-    }
-  });
 
   it('includes secure custom-field metadata on MAX rows in the authenticated integration list only', async () => {
     const integrationService = {

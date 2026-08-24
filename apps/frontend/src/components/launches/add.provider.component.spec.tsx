@@ -159,4 +159,66 @@ describe('secure custom-field submit seam', () => {
       expect(url).not.toContain(encodeURIComponent(legacyBase64));
     }
   });
+
+  it('rejects a missing opaque state before posting secrets', async () => {
+    mockFetch.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === '/integrations/social/max' && !init) {
+        return jsonResponse({ url: '' });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    const submitSecureCustomFields = await loadSecureSubmitSeam();
+
+    await expect(
+      submitSecureCustomFields({
+        identifier: 'max',
+        values: {
+          token: TOKEN,
+          chatId: CHAT_ID,
+        },
+        fetch: mockFetch,
+        gotoUrl: mockGotoUrl,
+        closeAll: mockCloseAll,
+        resetForm: mockResetForm,
+      })
+    ).rejects.toThrow('Could not start secure custom field staging');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockResetForm).not.toHaveBeenCalled();
+    expect(mockCloseAll).not.toHaveBeenCalled();
+    expect(mockGotoUrl).not.toHaveBeenCalled();
+  });
+
+  it('surfaces staging failure without reading or exposing response bodies', async () => {
+    mockFetch.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === '/integrations/social/max' && !init) {
+        return jsonResponse({ url: STATE });
+      }
+      if (url === '/integrations/social/max/custom-fields') {
+        return Promise.resolve({
+          ok: false,
+          text: async () => TOKEN,
+          json: async () => ({ error: TOKEN }),
+        } as Response);
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    const submitSecureCustomFields = await loadSecureSubmitSeam();
+
+    await expect(
+      submitSecureCustomFields({
+        identifier: 'max',
+        values: {
+          token: TOKEN,
+          chatId: CHAT_ID,
+        },
+        fetch: mockFetch,
+        gotoUrl: mockGotoUrl,
+        closeAll: mockCloseAll,
+        resetForm: mockResetForm,
+      })
+    ).rejects.toThrow('Could not stage secure custom fields');
+    expect(mockResetForm).not.toHaveBeenCalled();
+    expect(mockCloseAll).not.toHaveBeenCalled();
+    expect(mockGotoUrl).not.toHaveBeenCalled();
+  });
 });

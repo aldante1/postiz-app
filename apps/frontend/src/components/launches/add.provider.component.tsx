@@ -183,6 +183,9 @@ export const submitSecureCustomFields = async ({
       `/integrations/social/${identifier}${onboarding ? '?onboarding=true' : ''}`
     )
   ).json();
+  if (typeof state !== 'string' || state.length === 0) {
+    throw new Error('Could not start secure custom field staging');
+  }
 
   const response = await fetch(
     `/integrations/social/${identifier}/custom-fields`,
@@ -256,18 +259,30 @@ export const CustomVariables: FC<{
       {}
     ),
   });
+  const t = useT();
+  const toaster = useToaster();
   const submit = useCallback(
     async (data: FieldValues) => {
       if (secureCustomFields) {
-        await submitSecureCustomFields({
-          identifier,
-          values: data as Record<string, string>,
-          onboarding,
-          fetch,
-          gotoUrl,
-          closeAll: modals.closeAll,
-          resetForm: () => methods.reset(),
-        });
+        try {
+          await submitSecureCustomFields({
+            identifier,
+            values: data as Record<string, string>,
+            onboarding,
+            fetch,
+            gotoUrl,
+            closeAll: modals.closeAll,
+            resetForm: () => methods.reset(),
+          });
+        } catch (err) {
+          toaster.show(
+            t(
+              'could_not_connect_to_platform',
+              'Could not connect to the platform'
+            ),
+            'warning'
+          );
+        }
         return;
       }
 
@@ -285,10 +300,19 @@ export const CustomVariables: FC<{
         ).toString('base64')}${onboarding ? '&onboarding=true' : ''}`
       );
     },
-    [fetch, gotoUrl, identifier, methods, modals, onboarding, secureCustomFields]
+    [
+      fetch,
+      gotoUrl,
+      identifier,
+      methods,
+      modals,
+      onboarding,
+      secureCustomFields,
+      t,
+      toaster,
+    ]
   );
 
-  const t = useT();
 
   return (
     <div className="rounded-[4px] relative">

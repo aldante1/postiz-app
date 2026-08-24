@@ -107,6 +107,7 @@ export interface Integrations {
     name?: string;
     id?: string;
   };
+  secureCustomFields?: boolean;
 }
 
 // Helper function to get start and end dates based on display type
