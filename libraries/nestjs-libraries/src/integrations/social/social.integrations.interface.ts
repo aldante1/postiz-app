@@ -201,6 +201,7 @@ export interface SocialProvider
   name: string;
   toolTip?: string;
   oneTimeToken?: boolean;
+  secureCustomFields?: boolean;
   isBetweenSteps: boolean;
   scopes: string[];
   externalUrl?: (

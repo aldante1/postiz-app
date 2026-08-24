@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -32,6 +33,12 @@ import {
 } from '@gitroom/backend/services/auth/permissions/permission.exception.class';
 import { uniqBy } from 'lodash';
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
+import {
+  SECURE_CUSTOM_FIELDS_MAX_STATE_LENGTH,
+  SECURE_CUSTOM_FIELDS_MAX_VALUE_LENGTH,
+  SECURE_CUSTOM_FIELDS_MAX_VALUES_BYTES,
+  SecureCustomFieldsDto,
+} from '@gitroom/nestjs-libraries/dtos/integrations/secure.custom.fields.dto';
 
 @ApiTags('Integrations')
 @Controller('/integrations')
@@ -251,6 +258,71 @@ export class IntegrationsController {
     } catch (err) {
       return { err: true };
     }
+  }
+
+  @Post('/social/:integration/custom-fields')
+  @CheckPolicies([AuthorizationActions.Create, Sections.CHANNEL])
+  async stageSecureCustomFields(
+    @Param('integration') integration: string,
+    @Body() body: SecureCustomFieldsDto,
+    @GetOrgFromRequest() org: Organization
+  ) {
+    if (
+      !this._integrationManager
+        .getAllowedSocialsIntegrations()
+        .includes(integration)
+    ) {
+      throw new BadRequestException('Integration not allowed');
+    }
+
+    const integrationProvider =
+      this._integrationManager.getSocialIntegration(integration);
+    if (
+      !integrationProvider?.secureCustomFields ||
+      !integrationProvider.customFields
+    ) {
+      throw new BadRequestException('Secure custom fields not supported');
+    }
+
+    if (
+      !body ||
+      typeof body.state !== 'string' ||
+      body.state.length === 0 ||
+      body.state.length > SECURE_CUSTOM_FIELDS_MAX_STATE_LENGTH ||
+      !body.values ||
+      typeof body.values !== 'object' ||
+      Array.isArray(body.values)
+    ) {
+      throw new BadRequestException('Invalid secure custom fields payload');
+    }
+
+    const valuesJson = JSON.stringify(body.values);
+    if (
+      Buffer.byteLength(valuesJson, 'utf8') > SECURE_CUSTOM_FIELDS_MAX_VALUES_BYTES
+    ) {
+      throw new BadRequestException('Secure custom fields payload is too large');
+    }
+
+    const allowedKeys = new Set(
+      (await integrationProvider.customFields()).map((field) => field.key)
+    );
+    for (const [key, value] of Object.entries(body.values)) {
+      if (
+        !allowedKeys.has(key) ||
+        typeof value !== 'string' ||
+        value.length > SECURE_CUSTOM_FIELDS_MAX_VALUE_LENGTH
+      ) {
+        throw new BadRequestException('Invalid secure custom fields payload');
+      }
+    }
+
+    const organization = await ioRedis.get(`organization:${body.state}`);
+    if (!organization || organization !== org.id) {
+      throw new BadRequestException('Invalid state');
+    }
+
+    await ioRedis.set(`custom-fields:${body.state}`, valuesJson, 'EX', 300);
+    return { ok: true };
   }
 
   @Post('/:id/time')

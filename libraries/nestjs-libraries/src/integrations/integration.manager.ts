@@ -93,6 +93,9 @@ export class IntegrationManager {
             ? { extensionCookies: p.extensionCookies }
             : {}),
           ...(p.customFields ? { customFields: await p.customFields() } : {}),
+          ...(p.secureCustomFields
+            ? { secureCustomFields: p.secureCustomFields }
+            : {}),
         }))
       ),
       article: [] as any[],

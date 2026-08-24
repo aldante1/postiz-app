@@ -25,6 +25,10 @@ import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integration
 import { OrganizationService } from '@gitroom/nestjs-libraries/database/prisma/organizations/organization.service';
 import { getSsrfSafeDispatcher } from '@gitroom/nestjs-libraries/dtos/webhooks/ssrf.safe.dispatcher';
 
+
+type RedisWithGetDel = typeof ioRedis & {
+  getdel(key: string): Promise<string | null>;
+};
 @ApiTags('Integrations')
 @Controller('/integrations')
 export class NoAuthIntegrationsController {
@@ -58,13 +62,6 @@ export class NoAuthIntegrationsController {
     const integrationProvider =
       this._integrationManager.getSocialIntegration(integration);
 
-    const getCodeVerifier = integrationProvider.customFields
-      ? 'none'
-      : await ioRedis.get(`login:${body.state}`);
-    if (!getCodeVerifier) {
-      throw new Error('Invalid state');
-    }
-
     const organization = await ioRedis.get(`organization:${body.state}`);
     if (!organization) {
       throw new Error('Organization not found');
@@ -72,27 +69,35 @@ export class NoAuthIntegrationsController {
 
     const org = await this._organizationService.getOrgById(organization);
 
-    if (!integrationProvider.customFields) {
-      await ioRedis.del(`login:${body.state}`);
+    let authCode = body.code;
+    if (integrationProvider.secureCustomFields) {
+      if (body.code !== 'staged') {
+        throw new Error('Invalid staged credentials');
+      }
+
+      const stagedValues = await (ioRedis as RedisWithGetDel).getdel(
+        `custom-fields:${body.state}`
+      );
+      if (!stagedValues) {
+        throw new Error('Missing or expired staged credentials');
+      }
+
+      authCode = Buffer.from(stagedValues).toString('base64');
+    }
+
+    const getCodeVerifier = integrationProvider.customFields
+      ? 'none'
+      : await ioRedis.get(`login:${body.state}`);
+    if (!getCodeVerifier) {
+      throw new Error('Invalid state');
     }
 
     const details = integrationProvider.externalUrl
       ? await ioRedis.get(`external:${body.state}`)
       : undefined;
 
-    if (details) {
-      await ioRedis.del(`external:${body.state}`);
-    }
-
     const refresh = await ioRedis.get(`refresh:${body.state}`);
-    if (refresh) {
-      await ioRedis.del(`refresh:${body.state}`);
-    }
-
     const onboarding = await ioRedis.get(`onboarding:${body.state}`);
-    if (onboarding) {
-      await ioRedis.del(`onboarding:${body.state}`);
-    }
 
     const {
       error,
@@ -109,7 +114,7 @@ export class NoAuthIntegrationsController {
       try {
         const auth = await integrationProvider.authenticate(
           {
-            code: body.code,
+            code: authCode,
             codeVerifier: getCodeVerifier,
             refresh: body.refresh,
           },
@@ -176,6 +181,15 @@ export class NoAuthIntegrationsController {
       }
     });
 
+    for (const key of [
+      `login:${body.state}`,
+      `external:${body.state}`,
+      `refresh:${body.state}`,
+      `onboarding:${body.state}`,
+    ]) {
+      await ioRedis.del(key);
+    }
+
     if (error) {
       throw new NotEnoughScopes(error);
     }
@@ -231,11 +245,11 @@ export class NoAuthIntegrationsController {
           ? AuthService.fixedEncryption(details)
           : integrationProvider.customFields
           ? AuthService.fixedEncryption(
-              Buffer.from(body.code, 'base64').toString()
+              Buffer.from(authCode, 'base64').toString()
             )
           : integrationProvider.isChromeExtension
           ? AuthService.fixedEncryption(
-              Buffer.from(body.code, 'base64').toString()
+              Buffer.from(authCode, 'base64').toString()
             )
           : undefined
       );

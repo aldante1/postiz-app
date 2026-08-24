@@ -158,6 +158,53 @@ export const UrlModal: FC<{
     </div>
   );
 };
+
+export type SecureCustomFieldsSubmitParams = {
+  identifier: string;
+  values: Record<string, string>;
+  onboarding?: boolean;
+  fetch: (url: string, init?: RequestInit) => Promise<Response>;
+  gotoUrl: (url: string) => void;
+  closeAll: () => void;
+  resetForm: () => void;
+};
+
+export const submitSecureCustomFields = async ({
+  identifier,
+  values,
+  onboarding,
+  fetch,
+  gotoUrl,
+  closeAll,
+  resetForm,
+}: SecureCustomFieldsSubmitParams) => {
+  const { url: state } = await (
+    await fetch(
+      `/integrations/social/${identifier}${onboarding ? '?onboarding=true' : ''}`
+    )
+  ).json();
+
+  const response = await fetch(
+    `/integrations/social/${identifier}/custom-fields`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state, values }),
+    }
+  );
+  if (!response.ok) {
+    throw new Error('Could not stage secure custom fields');
+  }
+
+  resetForm();
+  closeAll();
+  gotoUrl(
+    `/integrations/social/${identifier}?state=${state}&code=staged${
+      onboarding ? '&onboarding=true' : ''
+    }`
+  );
+};
+
 export const CustomVariables: FC<{
   variables: Array<{
     key: string;
@@ -171,8 +218,10 @@ export const CustomVariables: FC<{
   identifier: string;
   gotoUrl(url: string): void;
   onboarding?: boolean;
+  secureCustomFields?: boolean;
 }> = (props) => {
-  const { close, gotoUrl, identifier, variables, onboarding } = props;
+  const { close, gotoUrl, identifier, variables, onboarding, secureCustomFields } =
+    props;
   const fetch = useFetch();
   const modals = useModals();
   const schema = useMemo(() => {
@@ -209,6 +258,19 @@ export const CustomVariables: FC<{
   });
   const submit = useCallback(
     async (data: FieldValues) => {
+      if (secureCustomFields) {
+        await submitSecureCustomFields({
+          identifier,
+          values: data as Record<string, string>,
+          onboarding,
+          fetch,
+          gotoUrl,
+          closeAll: modals.closeAll,
+          resetForm: () => methods.reset(),
+        });
+        return;
+      }
+
       const { url } = await (
         await fetch(
           `/integrations/social/${identifier}${
@@ -223,7 +285,7 @@ export const CustomVariables: FC<{
         ).toString('base64')}${onboarding ? '&onboarding=true' : ''}`
       );
     },
-    [variables, onboarding]
+    [fetch, gotoUrl, identifier, methods, modals, onboarding, secureCustomFields]
   );
 
   const t = useT();
@@ -395,6 +457,7 @@ export const AddProviderComponent: FC<{
       type: 'text' | 'password';
       hint?: string;
     }>;
+    secureCustomFields?: boolean;
   }>;
   article: Array<{
     identifier: string;
@@ -425,7 +488,8 @@ export const AddProviderComponent: FC<{
           defaultValue?: string;
           type: 'text' | 'password';
           hint?: string;
-        }>
+        }>,
+        secureCustomFields?: boolean
       ) =>
       async () => {
         const onboardingParam = onboarding ? 'onboarding=true' : '';
@@ -656,6 +720,7 @@ export const AddProviderComponent: FC<{
                   gotoUrl={(url: string) => router.push(url)}
                   variables={customFields}
                   onboarding={onboarding}
+                  secureCustomFields={secureCustomFields}
                 />
               </div>
             ),
@@ -702,7 +767,8 @@ export const AddProviderComponent: FC<{
                   item.isExternal,
                   item.isWeb3,
                   item.isChromeExtension,
-                  item.customFields
+                  item.customFields,
+                  item.secureCustomFields
                 )}
                 {...(!!item.toolTip
                   ? {
