@@ -1,0 +1,45 @@
+{
+  "provenance": {
+    "synthetic": true,
+    "redactions": [
+      "No bot token is present.",
+      "No real chat_id, channel name, private text, upload host, or production message URL is present.",
+      "Attachment tokens and upload URLs are deterministic synthetic placeholders."
+    ],
+    "sources": [
+      "https://dev.max.ru/docs-api/methods/POST/messages",
+      "https://dev.max.ru/docs-api/objects/Message",
+      "https://dev.max.ru/docs-api/methods/POST/uploads",
+      "https://pub.dev/documentation/max_bot_api/latest/max_bot_api/MessageBody-class.html"
+    ],
+    "liveSendConfirmation": "message.body.mid is source-verified from max_bot_api but provisional until Task 11 captures a real MAX send response."
+  },
+  "uploads": {
+    "imageOne": {
+      "url": "https://uploads.example.test/max/image/one",
+      "token": "synthetic-image-attachment-token-001"
+    },
+    "imageTwo": {
+      "url": "https://uploads.example.test/max/image/two",
+      "token": "synthetic-image-attachment-token-002"
+    },
+    "video": {
+      "url": "https://uploads.example.test/max/video/one",
+      "token": "synthetic-video-allocation-token-001",
+      "uploadToken": "synthetic-video-upload-token-override-001",
+      "retval": "synthetic-video-upload-retval-001"
+    },
+    "tokenlessVideo": {
+      "url": "https://uploads.example.test/max/video/tokenless",
+      "retval": "synthetic-video-upload-retval-tokenless"
+    }
+  },
+  "sendMessage": {
+    "message": {
+      "url": "https://max.ru/channel/synthetic-post-0001",
+      "body": {
+        "mid": "mid.synthetic.max.0001"
+      }
+    }
+  }
+}
