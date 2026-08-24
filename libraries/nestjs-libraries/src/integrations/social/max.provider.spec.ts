@@ -242,6 +242,32 @@ describe('MaxProvider authentication contract', () => {
     expectNoConsoleLeak([encoded]);
   });
 
+  it('preserves the normalized input chat_id as integration id when MAX returns an unsafe rounded number', async () => {
+    const unsafeChatId = '9007199254740993';
+    const roundedChannelChatId = Number(unsafeChatId);
+    const { provider, fetchMock } = providerWithFetch(
+      jsonResponse(botFixture),
+      jsonResponse({
+        ...activeChannelFixture,
+        chat_id: roundedChannelChatId,
+      }),
+      jsonResponse(adminMembershipFixture)
+    );
+    const encoded = encodeCredentials({
+      chatId: `  ${unsafeChatId}  `,
+    });
+
+    const result = await provider.authenticate({ code: encoded, codeVerifier: '' });
+
+    expect(result).toEqual(expect.objectContaining({ id: unsafeChatId }));
+    expectGetCalls(fetchMock, [
+      `${MAX_API_BASE}/me`,
+      `${MAX_API_BASE}/chats/${unsafeChatId}`,
+      `${MAX_API_BASE}/chats/${unsafeChatId}/members/me`,
+    ]);
+    expectNoConsoleLeak([encoded]);
+  });
+
   it('falls back to the bot avatar when the channel does not have an icon', async () => {
     const { provider } = providerWithFetch(
       jsonResponse(botFixture),
