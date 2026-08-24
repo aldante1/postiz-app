@@ -147,7 +147,7 @@ export class MaxProvider extends SocialAbstract implements SocialProvider {
 
     return {
       accessToken: token,
-      id: String(channel.chat_id ?? chatId),
+      id: chatId,
       name: channel.title || chatId,
       picture: channel.icon?.url || bot.avatar_url || bot.full_avatar_url || '',
       username: bot.username || bot.first_name || 'MAX bot',
