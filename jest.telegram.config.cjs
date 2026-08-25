@@ -12,6 +12,7 @@ module.exports = {
     '<rootDir>/libraries/nestjs-libraries/src/integrations/social/telegram.provider.spec.ts',
     '<rootDir>/libraries/nestjs-libraries/src/database/prisma/posts/post.limits.spec.ts',
     '<rootDir>/apps/orchestrator/src/activities/provider.message.spec.ts',
+    '<rootDir>/libraries/helpers/src/utils/sanitize.post.allowlist.spec.ts',
   ],
   transform: {
     '^.+\\.tsx?$': [

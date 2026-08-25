@@ -11,6 +11,7 @@
   },
   "files": [
     "libraries/nestjs-libraries/src/integrations/social/telegram.html.spec.ts",
+    "libraries/helpers/src/utils/sanitize.post.allowlist.spec.ts",
     "libraries/nestjs-libraries/src/integrations/social/telegram.provider.spec.ts",
     "libraries/nestjs-libraries/src/integrations/social/max.html.spec.ts",
     "libraries/nestjs-libraries/src/integrations/social/max.provider.spec.ts",

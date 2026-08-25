@@ -7,7 +7,7 @@ on:
       image_tag:
         description: Immutable GHCR tag (must start with max-v)
         required: true
-        default: max-v2.23.0-6
+        default: max-v2.23.0-7
         type: string
   push:
     tags:
