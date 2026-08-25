@@ -59,6 +59,8 @@ const ERROR_INVALID_MESSAGE_RESPONSE =
 const ERROR_INVALID_UPLOAD_RESPONSE =
   'MAX media upload did not return a valid upload response.';
 const ERROR_INVALID_UPLOAD_URL = 'MAX media upload URL must be public HTTPS.';
+const ERROR_ATTACHMENT_NOT_READY =
+  'MAX is still processing the uploaded attachment.';
 const ERROR_MESSAGE_TOO_LONG = 'MAX message exceeds the text limit.';
 
 type MaxCredentials = {
@@ -94,15 +96,19 @@ type MaxUploadAllocationResponse = {
   token?: string;
 };
 
+// Ответ сервера загрузки различается по типу вложения (проверено живым API 25.08):
+// image → {"photos":{"<key>":{"token":"…"}}}, video → XML `<retval>1</retval>`,
+// а токен видео приходит ещё в allocation. Поэтому разбираем ответ по типу, а не
+// ищем единое поле token.
+type MaxPhotoTokens = Record<string, { token: string }>;
+
 type MaxUploadResponse = {
-  token?: string;
-  retval?: unknown;
+  photos?: unknown;
 };
 
-type MaxAttachment = {
-  type: MaxMediaType;
-  payload: { token: string };
-};
+type MaxAttachment =
+  | { type: 'image'; payload: { photos: MaxPhotoTokens } }
+  | { type: 'video'; payload: { token: string } };
 
 type MaxValidatedMedia = {
   media: NonNullable<PostDetails['media']>[number];
@@ -230,6 +236,16 @@ export class MaxProvider extends SocialAbstract implements SocialProvider {
       return {
         type: 'bad-body',
         value: ERROR_RECONNECT_REQUIRED,
+      };
+    }
+
+    // MAX обрабатывает загруженное видео асинхронно и до готовности отвечает
+    // `attachment.not.ready` на отправку сообщения. Повтор здесь безопасен:
+    // сообщение ещё не создано, а SocialAbstract.fetch даёт три попытки с паузой.
+    if (body.includes('attachment.not.ready')) {
+      return {
+        type: 'retry',
+        value: ERROR_ATTACHMENT_NOT_READY,
       };
     }
 
@@ -402,39 +418,60 @@ export class MaxProvider extends SocialAbstract implements SocialProvider {
       throw new BadBody(this.identifier, '{}', '{}', ERROR_INVALID_UPLOAD_URL);
     }
 
-    const uploadResponse = await this.runStreamedUpload<MaxUploadResponse>(
-      async () => {
-        const stream = await this.mediaStream(media.path, this.identifier);
-        const form = new FormDataUpload();
-        form.append('data', stream, {
-          filename: this.mediaFilename(media.path),
-          knownLength: size,
-        });
+    const uploadResponse = await this.runStreamedUpload<unknown>(async () => {
+      const stream = await this.mediaStream(media.path, this.identifier);
+      const form = new FormDataUpload();
+      form.append('data', stream, {
+        filename: this.mediaFilename(media.path),
+        knownLength: size,
+      });
 
-        const { data } = await axios.post(uploadUrl, form, {
-          headers: form.getHeaders(),
-          httpsAgent: getMaxHttpsAgent(),
-          maxBodyLength: Infinity,
-          maxRedirects: 0,
-          proxy: false,
-        });
+      const { data } = await axios.post(uploadUrl, form, {
+        headers: form.getHeaders(),
+        httpsAgent: getMaxHttpsAgent(),
+        maxBodyLength: Infinity,
+        maxRedirects: 0,
+        proxy: false,
+      });
 
-        if (!data || typeof data !== 'object' || Array.isArray(data)) {
-          throw new BadBody(
-            this.identifier,
-            '{}',
-            '{}',
-            ERROR_INVALID_UPLOAD_RESPONSE
-          );
-        }
+      return data;
+    }, this.identifier);
 
-        return data as MaxUploadResponse;
-      },
-      this.identifier
-    );
+    if (type === 'video') {
+      // Тело ответа для видео — XML `<retval>1</retval>`, парсить нечего:
+      // токен выдаётся ещё в allocation.
+      const token = allocation.token;
+      if (typeof token !== 'string' || token.length === 0) {
+        throw new BadBody(
+          this.identifier,
+          '{}',
+          '{}',
+          ERROR_MISSING_ATTACHMENT_TOKEN
+        );
+      }
 
-    const token = uploadResponse?.token ?? allocation.token;
-    if (typeof token !== 'string' || token.length === 0) {
+      return { type, payload: { token } };
+    }
+
+    return { type, payload: { photos: this.parsePhotoTokens(uploadResponse) } };
+  }
+
+  private parsePhotoTokens(uploadResponse: unknown): MaxPhotoTokens {
+    if (
+      !uploadResponse ||
+      typeof uploadResponse !== 'object' ||
+      Array.isArray(uploadResponse)
+    ) {
+      throw new BadBody(
+        this.identifier,
+        '{}',
+        '{}',
+        ERROR_INVALID_UPLOAD_RESPONSE
+      );
+    }
+
+    const { photos } = uploadResponse as MaxUploadResponse;
+    if (!photos || typeof photos !== 'object' || Array.isArray(photos)) {
       throw new BadBody(
         this.identifier,
         '{}',
@@ -443,10 +480,36 @@ export class MaxProvider extends SocialAbstract implements SocialProvider {
       );
     }
 
-    return {
-      type,
-      payload: { token },
-    };
+    const entries = Object.entries(photos as Record<string, unknown>);
+    if (entries.length === 0) {
+      throw new BadBody(
+        this.identifier,
+        '{}',
+        '{}',
+        ERROR_MISSING_ATTACHMENT_TOKEN
+      );
+    }
+
+    const tokens: MaxPhotoTokens = {};
+    for (const [key, value] of entries) {
+      const token =
+        value && typeof value === 'object' && !Array.isArray(value)
+          ? (value as { token?: unknown }).token
+          : undefined;
+
+      if (typeof token !== 'string' || token.length === 0) {
+        throw new BadBody(
+          this.identifier,
+          '{}',
+          '{}',
+          ERROR_MISSING_ATTACHMENT_TOKEN
+        );
+      }
+
+      tokens[key] = { token };
+    }
+
+    return tokens;
   }
 
   private resolveMediaType(

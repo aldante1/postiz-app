@@ -10,28 +10,29 @@
       "https://dev.max.ru/docs-api/methods/POST/messages",
       "https://dev.max.ru/docs-api/objects/Message",
       "https://dev.max.ru/docs-api/methods/POST/uploads",
-      "https://pub.dev/documentation/max_bot_api/latest/max_bot_api/MessageBody-class.html"
+      "MAX schema.yaml v0.0.30: UploadEndpoint, PhotoTokens, PhotoAttachmentRequestPayload, UploadedInfo"
     ],
-    "liveSendConfirmation": "message.body.mid is source-verified from max_bot_api but provisional until Task 11 captures a real MAX send response."
+    "liveShapeConfirmation": "Response SHAPES captured from the live MAX API on 2026-08-25 (values replaced with placeholders): POST /uploads?type=image returns {url} with no token; POST /uploads?type=video returns {url, token}; uploading an image to the returned URL answers {\"photos\":{\"<key>\":{\"token\":\"…\"}}}; the video upload answers XML, not JSON."
   },
   "uploads": {
     "imageOne": {
       "url": "https://uploads.example.test/max/image/one",
-      "token": "synthetic-image-attachment-token-001"
+      "photoKey": "synthetic-photo-key-001==",
+      "token": "synthetic-image-photo-token-001"
     },
     "imageTwo": {
       "url": "https://uploads.example.test/max/image/two",
-      "token": "synthetic-image-attachment-token-002"
+      "photoKey": "synthetic-photo-key-002==",
+      "token": "synthetic-image-photo-token-002"
     },
     "video": {
       "url": "https://uploads.example.test/max/video/one",
       "token": "synthetic-video-allocation-token-001",
-      "uploadToken": "synthetic-video-upload-token-override-001",
-      "retval": "synthetic-video-upload-retval-001"
+      "retval": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><response><retval>1</retval></response>"
     },
     "tokenlessVideo": {
       "url": "https://uploads.example.test/max/video/tokenless",
-      "retval": "synthetic-video-upload-retval-tokenless"
+      "retval": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><response><retval>1</retval></response>"
     }
   },
   "sendMessage": {

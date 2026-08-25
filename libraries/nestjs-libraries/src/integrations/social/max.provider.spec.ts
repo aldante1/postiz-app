@@ -109,12 +109,12 @@ type MaxPublicationFixture = {
     synthetic: boolean;
     redactions: string[];
     sources: string[];
-    liveSendConfirmation: string;
+    liveShapeConfirmation: string;
   };
   uploads: {
-    imageOne: { url: string; token: string };
-    imageTwo: { url: string; token: string };
-    video: { url: string; token: string; uploadToken: string; retval: string };
+    imageOne: { url: string; photoKey: string; token: string };
+    imageTwo: { url: string; photoKey: string; token: string };
+    video: { url: string; token: string; retval: string };
     tokenlessVideo: { url: string; retval: string };
   };
   sendMessage: {
@@ -847,11 +847,23 @@ describe('MaxProvider publication contract', () => {
           attachments: [
             {
               type: 'image',
-              payload: { token: publicationFixture.uploads.imageOne.token },
+              payload: {
+                photos: {
+                  [publicationFixture.uploads.imageOne.photoKey]: {
+                    token: publicationFixture.uploads.imageOne.token,
+                  },
+                },
+              },
             },
             {
               type: 'image',
-              payload: { token: publicationFixture.uploads.imageTwo.token },
+              payload: {
+                photos: {
+                  [publicationFixture.uploads.imageTwo.photoKey]: {
+                    token: publicationFixture.uploads.imageTwo.token,
+                  },
+                },
+              },
             },
           ],
         });
@@ -880,7 +892,11 @@ describe('MaxProvider publication contract', () => {
       uploadedUrls.push(String(url));
       const stream = expectAxiosUpload(url, form, config);
       expect(await readNodeReadable(stream)).toEqual(matchedUpload.content);
-      return axiosResponse({ token: matchedUpload.token });
+      return axiosResponse({
+        photos: {
+          [matchedUpload.photoKey]: { token: matchedUpload.token },
+        },
+      });
     });
 
     await provider.post(
@@ -907,6 +923,102 @@ describe('MaxProvider publication contract', () => {
       publicationFixture.uploads.imageTwo.url,
     ]);
     expectNoTokenInUrls(calls);
+  });
+
+  it.each([
+    { name: 'without photos', uploadBody: {} },
+    { name: 'with empty photos', uploadBody: { photos: {} } },
+    { name: 'with a photo key but no token', uploadBody: { photos: { key: {} } } },
+  ])(
+    'rejects image upload response $name before creating the message',
+    async ({ uploadBody }) => {
+      const imageContent = Buffer.concat([tinyPng(), Buffer.from('missing-photo-token')]);
+      const imagePath = createTempMediaFile('max-missing-photo-token.png', imageContent);
+      const { provider, calls } = providerWithFetchRecorder(async (request) => {
+        if (isMaxUploadAllocation(request, 'image')) {
+          return jsonResponse({ url: publicationFixture.uploads.imageOne.url });
+        }
+
+        if (isMaxMessageRequest(request)) {
+          throw new Error('Message must not be created without image photo tokens');
+        }
+
+        throwUnexpectedRequest(request);
+      });
+      mockImageDimensions(provider);
+      mockedAxiosPost().mockImplementation(async (url, form, config) => {
+        const stream = expectAxiosUpload(url, form, config);
+        expect(await readNodeReadable(stream)).toEqual(imageContent);
+        return axiosResponse(uploadBody);
+      });
+
+      await expectPublicationRejectsWithoutLeaks(
+        provider.post(
+          SYNTHETIC_CHAT_ID,
+          SYNTHETIC_TOKEN,
+          [maxPost({ media: [{ type: 'image', path: imagePath }] })],
+          syntheticIntegration()
+        ),
+        'MAX media upload did not return an attachment token.'
+      );
+      expect(calls.map((call) => call.url)).toEqual([
+        `${MAX_API_BASE}/uploads?type=image`,
+      ]);
+      expect(mockedAxiosPost()).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  it('passes every returned MAX photo token key through to the image attachment payload', async () => {
+    const imageContent = Buffer.concat([tinyPng(), Buffer.from('two-photo-keys')]);
+    const imagePath = createTempMediaFile('max-two-photo-keys.png', imageContent);
+    const photos = {
+      [publicationFixture.uploads.imageOne.photoKey]: {
+        token: publicationFixture.uploads.imageOne.token,
+      },
+      'synthetic-photo-key-extra==': {
+        token: 'synthetic-image-photo-token-extra',
+      },
+    };
+    const { provider, calls } = providerWithFetchRecorder(async (request) => {
+      if (isMaxUploadAllocation(request, 'image')) {
+        return jsonResponse({ url: publicationFixture.uploads.imageOne.url });
+      }
+
+      if (isMaxMessageRequest(request)) {
+        expect(await requestJson(request)).toEqual({
+          text: SYNTHETIC_FORMATTED_TEXT,
+          format: 'html',
+          notify: true,
+          attachments: [
+            {
+              type: 'image',
+              payload: { photos },
+            },
+          ],
+        });
+        return jsonResponse(publicationFixture.sendMessage);
+      }
+
+      throwUnexpectedRequest(request);
+    });
+    mockImageDimensions(provider);
+    mockedAxiosPost().mockImplementation(async (url, form, config) => {
+      const stream = expectAxiosUpload(url, form, config);
+      expect(await readNodeReadable(stream)).toEqual(imageContent);
+      return axiosResponse({ photos });
+    });
+
+    await provider.post(
+      SYNTHETIC_CHAT_ID,
+      SYNTHETIC_TOKEN,
+      [maxPost({ media: [{ type: 'image', path: imagePath }] })],
+      syntheticIntegration()
+    );
+
+    expect(calls.map((call) => call.url)).toEqual([
+      `${MAX_API_BASE}/uploads?type=image`,
+      `${MAX_API_BASE}/messages?chat_id=${SYNTHETIC_CHAT_ID}`,
+    ]);
   });
 
   it.each([
@@ -961,7 +1073,7 @@ describe('MaxProvider publication contract', () => {
     }
   );
 
-  it('streams video through axios FormData and falls back to the allocation token when upload returns only retval metadata', async () => {
+  it('streams video through axios FormData, uses the allocation token, and ignores the XML upload response body', async () => {
     const videoContent = Buffer.from('synthetic max video bytes\n');
     const videoPath = createTempMediaFile('max-video.mp4', videoContent);
     forbidEagerFileReads(videoPath);
@@ -993,7 +1105,7 @@ describe('MaxProvider publication contract', () => {
     mockedAxiosPost().mockImplementation(async (url, form, config) => {
       const stream = expectAxiosUpload(url, form, config);
       expect(await readNodeReadable(stream)).toEqual(videoContent);
-      return axiosResponse({ retval: publicationFixture.uploads.video.retval });
+      return axiosResponse(publicationFixture.uploads.video.retval);
     });
 
     await provider.post(
@@ -1048,7 +1160,7 @@ describe('MaxProvider publication contract', () => {
     mockedAxiosPost().mockImplementation(async (url, form, config) => {
       const stream = expectAxiosUpload(url, form, config);
       destroyNodeStream(stream);
-      return axiosResponse({ retval: publicationFixture.uploads.video.retval });
+      return axiosResponse(publicationFixture.uploads.video.retval);
     });
 
     await provider.post(
@@ -1065,11 +1177,12 @@ describe('MaxProvider publication contract', () => {
     expect(dimensionSpy).not.toHaveBeenCalled();
   });
 
-  it('uses the upload response token when allocation and upload both provide different video tokens', async () => {
+  it('uses the allocation token for video even when the upload response body contains another token', async () => {
     const videoPath = createTempMediaFile(
       'max-video-upload-token.mp4',
       Buffer.from('synthetic max video upload token bytes\n')
     );
+    const uploadBodyToken = 'synthetic-video-upload-body-token-ignored';
     const { provider } = providerWithFetchRecorder(async (request) => {
       if (isMaxUploadAllocation(request, 'video')) {
         return jsonResponse({
@@ -1086,7 +1199,7 @@ describe('MaxProvider publication contract', () => {
           attachments: [
             {
               type: 'video',
-              payload: { token: publicationFixture.uploads.video.uploadToken },
+              payload: { token: publicationFixture.uploads.video.token },
             },
           ],
         });
@@ -1099,7 +1212,7 @@ describe('MaxProvider publication contract', () => {
       const stream = expectAxiosUpload(url, form, config);
       destroyNodeStream(stream);
       return axiosResponse({
-        token: publicationFixture.uploads.video.uploadToken,
+        token: uploadBodyToken,
         retval: publicationFixture.uploads.video.retval,
       });
     });
@@ -1159,7 +1272,7 @@ describe('MaxProvider publication contract', () => {
         expect(await readNodeReadable(stream)).toEqual(
           Buffer.from('synthetic retry video bytes\n')
         );
-        return axiosResponse({ retval: publicationFixture.uploads.video.retval });
+        return axiosResponse(publicationFixture.uploads.video.retval);
       });
 
     await provider.post(
@@ -1210,7 +1323,7 @@ describe('MaxProvider publication contract', () => {
       );
       const stream = expectAxiosUpload(url, form, config);
       expect(await readNodeReadable(stream)).toEqual(remoteContent);
-      return axiosResponse({ token: publicationFixture.uploads.video.token });
+      return axiosResponse(publicationFixture.uploads.video.retval);
     });
 
     await provider.post(
@@ -1325,7 +1438,7 @@ describe('MaxProvider publication contract', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('rejects media when neither allocation nor upload returns a token before creating the message', async () => {
+  it('rejects video allocation without a token before creating the message', async () => {
     const videoPath = createTempMediaFile(
       'max-tokenless-video.mp4',
       Buffer.from('synthetic tokenless video bytes\n')
@@ -1346,7 +1459,7 @@ describe('MaxProvider publication contract', () => {
       expect(await readNodeReadable(stream)).toEqual(
         Buffer.from('synthetic tokenless video bytes\n')
       );
-      return axiosResponse({ retval: publicationFixture.uploads.tokenlessVideo.retval });
+      return axiosResponse(publicationFixture.uploads.tokenlessVideo.retval);
     });
 
     await expectPublicationRejectsWithoutLeaks(
@@ -1364,12 +1477,61 @@ describe('MaxProvider publication contract', () => {
     expect(mockedAxiosPost()).toHaveBeenCalledTimes(1);
   });
 
-  it('rejects string upload responses before falling back to the allocation token or creating a message', async () => {
-    const videoPath = createTempMediaFile(
-      'max-html-upload-response.mp4',
-      Buffer.from('synthetic html upload response video bytes\n')
-    );
-    const uploadHtml = '<html>synthetic upload host response</html>';
+  it.each([
+    {
+      name: 'string',
+      uploadBody: '<html>synthetic upload host response</html>',
+      extraSecrets: ['<html>synthetic upload host response</html>'],
+    },
+    {
+      name: 'array',
+      uploadBody: [{ token: publicationFixture.uploads.imageOne.token }],
+      extraSecrets: [publicationFixture.uploads.imageOne.token],
+    },
+  ])(
+    'rejects image upload response when the upload host returns a $name instead of an object',
+    async ({ uploadBody, extraSecrets }) => {
+      const imageContent = Buffer.concat([tinyPng(), Buffer.from('invalid-image-body')]);
+      const imagePath = createTempMediaFile('max-invalid-image-upload-body.png', imageContent);
+      const { provider, calls } = providerWithFetchRecorder(async (request) => {
+        if (isMaxUploadAllocation(request, 'image')) {
+          return jsonResponse({ url: publicationFixture.uploads.imageOne.url });
+        }
+
+        if (isMaxMessageRequest(request)) {
+          throw new Error('Message must not be created after an invalid image upload body');
+        }
+
+        throwUnexpectedRequest(request);
+      });
+      mockImageDimensions(provider);
+      mockedAxiosPost().mockImplementation(async (url, form, config) => {
+        const stream = expectAxiosUpload(url, form, config);
+        expect(await readNodeReadable(stream)).toEqual(imageContent);
+        return axiosResponse(uploadBody);
+      });
+
+      await expectPublicationRejectsWithoutLeaks(
+        provider.post(
+          SYNTHETIC_CHAT_ID,
+          SYNTHETIC_TOKEN,
+          [maxPost({ media: [{ type: 'image', path: imagePath }] })],
+          syntheticIntegration()
+        ),
+        'MAX media upload did not return a valid upload response.',
+        extraSecrets
+      );
+      expect(calls.map((call) => call.url)).toEqual([
+        `${MAX_API_BASE}/uploads?type=image`,
+      ]);
+      expect(mockedAxiosPost()).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  it('retries attachment.not.ready message responses and completes the publication', async () => {
+    const videoContent = Buffer.from('synthetic not-ready video bytes\n');
+    const videoPath = createTempMediaFile('max-not-ready-video.mp4', videoContent);
+    let messageAttempts = 0;
     const { provider, calls } = providerWithFetchRecorder(async (request) => {
       if (isMaxUploadAllocation(request, 'video')) {
         return jsonResponse({
@@ -1379,37 +1541,110 @@ describe('MaxProvider publication contract', () => {
       }
 
       if (isMaxMessageRequest(request)) {
-        throw new Error('Message must not be created after an invalid upload body');
+        messageAttempts += 1;
+        expect(await requestJson(request)).toEqual({
+          text: SYNTHETIC_FORMATTED_TEXT,
+          format: 'html',
+          notify: true,
+          attachments: [
+            {
+              type: 'video',
+              payload: { token: publicationFixture.uploads.video.token },
+            },
+          ],
+        });
+        return messageAttempts === 1
+          ? jsonResponse({ code: 'attachment.not.ready', message: '' }, 400)
+          : jsonResponse(publicationFixture.sendMessage);
       }
 
       throwUnexpectedRequest(request);
     });
     mockedAxiosPost().mockImplementation(async (url, form, config) => {
       const stream = expectAxiosUpload(url, form, config);
-      expect(await readNodeReadable(stream)).toEqual(
-        Buffer.from('synthetic html upload response video bytes\n')
-      );
-      return axiosResponse(uploadHtml);
+      expect(await readNodeReadable(stream)).toEqual(videoContent);
+      return axiosResponse(publicationFixture.uploads.video.retval);
+    });
+
+    const result = await provider.post(
+      SYNTHETIC_CHAT_ID,
+      SYNTHETIC_TOKEN,
+      [maxPost({ media: [{ type: 'video', path: videoPath }] })],
+      syntheticIntegration()
+    );
+
+    expect(result[0]).toEqual(
+      expect.objectContaining({
+        postId: publicationFixture.sendMessage.message.body.mid,
+        status: 'completed',
+      })
+    );
+    expect(messageAttempts).toBe(2);
+    expect(
+      calls.filter(
+        (call) => call.url === `${MAX_API_BASE}/messages?chat_id=${SYNTHETIC_CHAT_ID}`
+      )
+    ).toHaveLength(2);
+  });
+
+  it('fails without leaking the post body or bot token when attachment.not.ready persists', async () => {
+    const secretPostText = 'secret MAX post body for persistent not-ready retries';
+    const videoContent = Buffer.from('synthetic persistent not-ready video bytes\n');
+    const videoPath = createTempMediaFile('max-persistent-not-ready-video.mp4', videoContent);
+    let messageAttempts = 0;
+    const { provider, calls } = providerWithFetchRecorder(async (request) => {
+      if (isMaxUploadAllocation(request, 'video')) {
+        return jsonResponse({
+          url: publicationFixture.uploads.video.url,
+          token: publicationFixture.uploads.video.token,
+        });
+      }
+
+      if (isMaxMessageRequest(request)) {
+        messageAttempts += 1;
+        expect(await requestJson(request)).toEqual({
+          text: secretPostText,
+          format: 'html',
+          notify: true,
+          attachments: [
+            {
+              type: 'video',
+              payload: { token: publicationFixture.uploads.video.token },
+            },
+          ],
+        });
+        return jsonResponse({ code: 'attachment.not.ready', message: '' }, 400);
+      }
+
+      throwUnexpectedRequest(request);
+    });
+    mockedAxiosPost().mockImplementation(async (url, form, config) => {
+      const stream = expectAxiosUpload(url, form, config);
+      expect(await readNodeReadable(stream)).toEqual(videoContent);
+      return axiosResponse(publicationFixture.uploads.video.retval);
     });
 
     await expectPublicationRejectsWithoutLeaks(
       provider.post(
         SYNTHETIC_CHAT_ID,
         SYNTHETIC_TOKEN,
-        [maxPost({ media: [{ type: 'video', path: videoPath }] })],
+        [
+          maxPost({
+            message: `<p>${secretPostText}</p>`,
+            media: [{ type: 'video', path: videoPath }],
+          }),
+        ],
         syntheticIntegration()
       ),
-      'MAX media upload did not return a valid upload response.',
-      [
-        publicationFixture.uploads.video.url,
-        publicationFixture.uploads.video.token,
-        uploadHtml,
-      ]
+      'MAX is still processing the uploaded attachment.',
+      [secretPostText, publicationFixture.uploads.video.token]
     );
-    expect(calls.map((call) => call.url)).toEqual([
-      `${MAX_API_BASE}/uploads?type=video`,
-    ]);
-    expect(mockedAxiosPost()).toHaveBeenCalledTimes(1);
+    expect(messageAttempts).toBe(4);
+    expect(
+      calls.filter(
+        (call) => call.url === `${MAX_API_BASE}/messages?chat_id=${SYNTHETIC_CHAT_ID}`
+      )
+    ).toHaveLength(4);
   });
 
   it.each([401, 403])(
