@@ -10,7 +10,7 @@ import {
   SocialAbstract,
 } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { isBlockedIp } from '@gitroom/nestjs-libraries/dtos/webhooks/webhook.url.validator';
-import { hasExtension } from '@gitroom/helpers/utils/has.extension';
+import mime from 'mime';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
 import { Integration } from '@prisma/client';
 import axios from 'axios';
@@ -519,8 +519,22 @@ export class MaxProvider extends SocialAbstract implements SocialProvider {
       return 'video';
     }
 
+    // `updateMedia` в общем пайплайне помечает ВСЕ вложения как `image`, поэтому
+    // настоящий тип определяется по расширению. Telegram-провайдер для того же
+    // делает `mime.getType`, здесь та же логика: иначе .mov или .webm уехали бы
+    // в MAX как картинка.
     if (media.type === 'image') {
-      return hasExtension(media.path, 'mp4') ? 'video' : 'image';
+      const mimeType = mime.getType(media.path.split('?')[0]);
+
+      if (mimeType?.startsWith('video/')) {
+        return 'video';
+      }
+
+      if (mimeType?.startsWith('image/')) {
+        return 'image';
+      }
+
+      return undefined;
     }
 
     return undefined;

@@ -1177,6 +1177,77 @@ describe('MaxProvider publication contract', () => {
     expect(dimensionSpy).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['mov', 'max-update-media-synthetic-image.mov'],
+    ['webm', 'max-update-media-synthetic-image.webm'],
+  ])('treats a %s path marked as image by updateMedia as video', async (_ext, name) => {
+    const videoPath = createSparseMediaFile(name, 1024);
+    forbidEagerFileReads(videoPath);
+    const { provider, calls } = providerWithFetchRecorder(async (request) => {
+      if (isMaxUploadAllocation(request, 'video')) {
+        return jsonResponse({
+          url: publicationFixture.uploads.video.url,
+          token: publicationFixture.uploads.video.token,
+        });
+      }
+
+      if (isMaxMessageRequest(request)) {
+        expect(await requestJson(request)).toEqual({
+          text: SYNTHETIC_FORMATTED_TEXT,
+          format: 'html',
+          notify: true,
+          attachments: [
+            {
+              type: 'video',
+              payload: { token: publicationFixture.uploads.video.token },
+            },
+          ],
+        });
+        return jsonResponse(publicationFixture.sendMessage);
+      }
+
+      throwUnexpectedRequest(request);
+    });
+    mockedAxiosPost().mockImplementation(async (url, form, config) => {
+      const stream = expectAxiosUpload(url, form, config);
+      destroyNodeStream(stream);
+      return axiosResponse(publicationFixture.uploads.video.retval);
+    });
+
+    await provider.post(
+      SYNTHETIC_CHAT_ID,
+      SYNTHETIC_TOKEN,
+      [maxPost({ media: [{ type: 'image', path: videoPath }] })],
+      syntheticIntegration()
+    );
+
+    expect(calls.map((call) => call.url)).toEqual([
+      `${MAX_API_BASE}/uploads?type=video`,
+      `${MAX_API_BASE}/messages?chat_id=${SYNTHETIC_CHAT_ID}`,
+    ]);
+  });
+
+  it('rejects a media path whose extension maps to neither image nor video', async () => {
+    const documentPath = createTempMediaFile(
+      'max-unsupported-document.pdf',
+      Buffer.from('synthetic max unsupported document bytes\n')
+    );
+    const { provider, calls } = providerWithFetchRecorder(async (request) => {
+      throwUnexpectedRequest(request);
+    });
+
+    await expect(
+      provider.post(
+        SYNTHETIC_CHAT_ID,
+        SYNTHETIC_TOKEN,
+        [maxPost({ media: [{ type: 'image', path: documentPath }] })],
+        syntheticIntegration()
+      )
+    ).rejects.toThrow('MAX supports image and video attachments only.');
+
+    expect(calls).toHaveLength(0);
+  });
+
   it('uses the allocation token for video even when the upload response body contains another token', async () => {
     const videoPath = createTempMediaFile(
       'max-video-upload-token.mp4',
