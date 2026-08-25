@@ -240,6 +240,14 @@ const formatElement = (
 
   formatChildren(node.childNodes, writer, state);
 
+  // `p`/`div` дают перевод строки всегда: пустой абзац — это намеренная пустая
+  // строка. `blockquote` — обёртка над абзацами, её собственный перевод строки
+  // нужен только если содержимое им не закончилось.
+  if (tagName === 'blockquote') {
+    writer.blockBreak();
+    return;
+  }
+
   if (isUnknownBlockTag(tagName)) {
     writer.lineBreak();
   }
@@ -344,8 +352,7 @@ const formatAllowedElement = (
     return;
   }
 
-  const isBlock =
-    tagName === 'h1' || tagName === 'blockquote' || tagName === 'pre';
+  const isBlock = tagName === 'h1' || tagName === 'pre';
 
   writer.raw(`<${tagName}>`);
   const contentStart = writer.mark();
@@ -404,6 +411,9 @@ const normalizeTagName = (tagName: string): string => {
   }
 };
 
+// `blockquote` здесь нет намеренно: схема MAX объявляет QuoteMarkup, но живой API
+// 25.08 не создал сущность ни на `<blockquote>`, ни на markdown `> ` — тег просто
+// вырезается. Отправлять его бессмысленно, содержимое выводим отдельным блоком.
 const isAllowedMaxTag = (tagName: string): boolean => {
   switch (tagName) {
     case 'b':
@@ -413,7 +423,6 @@ const isAllowedMaxTag = (tagName: string): boolean => {
     case 'code':
     case 'pre':
     case 'mark':
-    case 'blockquote':
     case 'h1':
       return true;
     default:

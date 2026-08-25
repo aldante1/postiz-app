@@ -13,7 +13,6 @@ const allowedTagCases: Array<[string, string, string, number]> = [
   ['code', '<p><code>code</code></p>', '<code>code</code>', 4],
   ['pre', '<pre>block</pre>', '<pre>block</pre>', 5],
   ['mark', '<p><mark>highlight</mark></p>', '<mark>highlight</mark>', 9],
-  ['blockquote', '<blockquote>quote</blockquote>', '<blockquote>quote</blockquote>', 5],
   ['h1', '<h1>Title</h1>', '<h1>Title</h1>', 5],
   ['h2', '<h2>Title</h2>', '<h1>Title</h1>', 5],
   ['h3', '<h3>Title</h3>', '<h1>Title</h1>', 5],
@@ -136,18 +135,18 @@ describe('MAX HTML formatter contract', () => {
     });
   });
 
-  it('keeps the block separator outside the closing tag of a quote', () => {
+  it('separates an unwrapped quote from the next block with a single line break', () => {
     expect(
       toMaxHtml('<blockquote><p>Цитата</p></blockquote><ul><li><p>пункт</p></li></ul>')
     ).toEqual({
-      html: '<blockquote>Цитата</blockquote>\n• пункт',
+      html: 'Цитата\n• пункт',
       length: 14,
     });
   });
 
-  it('strips unsupported blockquote attributes and h4-h6 also normalize to h1', () => {
+  it('unwraps blockquote into plain text and normalizes h4-h6 to h1', () => {
     expect(toMaxHtml('<blockquote expandable="" class="quote">quote</blockquote><h4>Four</h4><h6>Six</h6>')).toEqual({
-      html: '<blockquote>quote</blockquote>\n<h1>Four</h1>\n<h1>Six</h1>',
+      html: 'quote\n<h1>Four</h1>\n<h1>Six</h1>',
       length: 14,
     });
   });

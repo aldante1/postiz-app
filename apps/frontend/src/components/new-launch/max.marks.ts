@@ -1,5 +1,4 @@
 import { Mark } from '@tiptap/core';
-import Blockquote from '@tiptap/extension-blockquote';
 import Code from '@tiptap/extension-code';
 import CodeBlock from '@tiptap/extension-code-block';
 import Italic from '@tiptap/extension-italic';
@@ -47,11 +46,12 @@ export const MaxHighlight = Mark.create({
   },
 });
 
+// Цитаты в списке нет: живой API MAX 25.08 не создаёт QuoteMarkup ни на
+// `<blockquote>`, ни на markdown `> `, поэтому кнопка была бы обманом.
 export const maxExtensions = () => [
   Italic,
   Strike,
   Code,
   CodeBlock,
-  Blockquote,
   MaxHighlight,
 ];

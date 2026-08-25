@@ -13,7 +13,6 @@ describe('MAX editor extensions', () => {
       'strike',
       'code',
       'codeBlock',
-      'blockquote',
       'maxHighlight',
     ]);
     expect(names).not.toContain('telegramSpoiler');
@@ -50,12 +49,10 @@ describe('MAX editor extensions', () => {
     ).toEqual(['mark', { class: 'selection' }, 0]);
   });
 
-  it('uses plain blockquote without expandable attributes', () => {
-    const blockquote = maxExtensions().find(
-      (extension) => extension.name === 'blockquote'
-    );
+  it('omits blockquote entirely: MAX never renders a quote', () => {
+    const names = maxExtensions().map((extension) => extension.name);
 
-    expect(blockquote?.config.addAttributes).toBeUndefined();
+    expect(names).not.toContain('blockquote');
   });
 
   it('declares MAX highlight commands', () => {

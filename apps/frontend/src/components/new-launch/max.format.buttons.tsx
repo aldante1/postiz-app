@@ -109,30 +109,6 @@ export const MaxFormatButtons: FC<{ editor: Editor | null | undefined }> = ({
         </svg>
       </FormatButton>
       <FormatButton
-        tooltip={t('format_quote', 'Quote')}
-        active={Boolean(editor?.isActive?.('blockquote'))}
-        onClick={() => {
-          editor?.commands?.toggleBlockquote();
-          editor?.commands?.focus();
-        }}
-      >
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          width="16"
-          height="16"
-          viewBox="0 0 16 16"
-          fill="none"
-        >
-          <path
-            d="M6.00065 4.66699H4.66732C3.93094 4.66699 3.33398 5.26395 3.33398 6.00033V7.33366C3.33398 8.07004 3.93094 8.66699 4.66732 8.66699H5.33398V11.3337M12.0007 4.66699H10.6673C9.93094 4.66699 9.33398 5.26395 9.33398 6.00033V7.33366C9.33398 8.07004 9.93094 8.66699 10.6673 8.66699H11.334V11.3337"
-            stroke="currentColor"
-            strokeWidth="1.2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
-      </FormatButton>
-      <FormatButton
         tooltip={t('format_highlight', 'Highlight')}
         active={Boolean(editor?.isActive?.('maxHighlight'))}
         onClick={() => {
