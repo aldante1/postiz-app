@@ -40,7 +40,11 @@ export function parseArgs(argv: string[]): CliOptions {
     return value;
   };
 
-  for (let index = 0; index < argv.length; index += 1) {
+  for (
+    let index = argv[0] === 'media:retention' ? 1 : 0;
+    index < argv.length;
+    index += 1
+  ) {
     const argument = argv[index];
     switch (argument) {
       case '--dry-run':

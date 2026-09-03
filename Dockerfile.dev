@@ -3,6 +3,7 @@ ARG NEXT_PUBLIC_VERSION
 ENV NEXT_PUBLIC_VERSION=$NEXT_PUBLIC_VERSION
 RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
+    ffmpeg \
     make \
     python3-pip \
     bash \
@@ -26,5 +27,6 @@ COPY var/docker/nginx.conf /etc/nginx/nginx.conf
 
 RUN pnpm install
 RUN NODE_OPTIONS="--max-old-space-size=4096" pnpm run build
+RUN pnpm --filter ./apps/media-retention build
 
 CMD ["sh", "-c", "nginx && pnpm run pm2"]

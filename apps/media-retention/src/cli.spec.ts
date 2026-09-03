@@ -164,6 +164,14 @@ describe('parseArgs', () => {
     });
   });
 
+  it('accepts the packaged media:retention command before flags', () => {
+    expect(parseArgs(['media:retention', '--dry-run'])).toEqual({
+      mode: 'dry-run',
+      orphanMode: 'off',
+      olderThanDays: 30,
+    });
+  });
+
   it('parses apply, organization, age, orphan, and report flags', () => {
     expect(
       parseArgs([

@@ -1,0 +1,15 @@
+services:
+  postiz-maintenance:
+    image: ghcr.io/aldante1/postiz-app:max-v2.23.0-9
+    profiles: [maintenance]
+    env_file: .env
+    volumes:
+      - postiz-uploads:/uploads
+    entrypoint:
+      - node
+      - /app/apps/media-retention/dist/main.js
+      - media:retention
+    mem_limit: 512m
+    memswap_limit: 768m
+    environment:
+      NODE_OPTIONS: --max-old-space-size=256
