@@ -8,9 +8,17 @@ import SafeImage from '@gitroom/react/helpers/safe.image';
 import { useLaunchStore } from '@gitroom/frontend/components/new-launch/store';
 import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
 
+type PreviewTransformResult = {
+  content: string;
+  overflowHtml: string;
+};
+
 export const GeneralPreviewComponent: FC<{
   maximumCharacters?: number;
-  transformContent?: (content: string, maximumCharacters: number) => string;
+  transformContent?: (
+    content: string,
+    maximumCharacters: number
+  ) => PreviewTransformResult;
   previewClassName?: string;
 }> = (props) => {
   const { value: topValue, integration } = useIntegration();
@@ -25,26 +33,31 @@ export const GeneralPreviewComponent: FC<{
         return `[[[${match2}]]]`;
       }
     );
-    const newContent =
-      props.transformContent?.(contentWithMentionTokens, maximumCharacters) ||
-      stripHtmlValidation('normal', contentWithMentionTokens, true);
-
+    const transformedContent = props.transformContent
+      ? props.transformContent(contentWithMentionTokens, maximumCharacters)
+      : null;
+    const newContent = transformedContent
+      ? transformedContent.content
+      : stripHtmlValidation('normal', contentWithMentionTokens, true);
     const { start, end } = textSlicer(
       integration?.identifier || '',
-      props.transformContent ? Number.MAX_SAFE_INTEGER : maximumCharacters,
+      transformedContent ? Number.MAX_SAFE_INTEGER : maximumCharacters,
       newContent
     );
-
-    const finalValue =
-      newContent
-        .slice(start, end)
-        .replace(/\[\[\[([.\s\S]*?)]]]/, (match, match1) => {
-          return `<span class="font-bold font-[arial]" style="color: #ae8afc">${match1}</span>`;
-        }) +
-      `<mark class="bg-red-500" data-tooltip-id="tooltip" data-tooltip-content="This text will be cropped">` +
-      newContent.slice(end).replace(/\[\[\[([.\s\S]*?)]]]/, (match, match1) => {
+    const visibleContent = newContent
+      .slice(start, end)
+      .replace(/\[\[\[([.\s\S]*?)]]]/, (match, match1) => {
         return `<span class="font-bold font-[arial]" style="color: #ae8afc">${match1}</span>`;
-      }) +
+      });
+    const overflowContent = transformedContent
+      ? transformedContent.overflowHtml
+      : newContent.slice(end).replace(/\[\[\[([.\s\S]*?)]]]/, (match, match1) => {
+          return `<span class="font-bold font-[arial]" style="color: #ae8afc">${match1}</span>`;
+        });
+    const finalValue =
+      visibleContent +
+      `<mark class="bg-red-500" data-tooltip-id="tooltip" data-tooltip-content="This text will be cropped">` +
+      overflowContent +
       `</mark>`;
 
     return { text: finalValue, images: p.image };

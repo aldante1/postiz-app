@@ -6,6 +6,19 @@ type PreviewNode = {
   value?: string;
 };
 
+export type RichPreviewContent = {
+  content: string;
+  overflowHtml: string;
+};
+
+const textContent = (node: PreviewNode): string => {
+  if (node.nodeName === '#text') {
+    return node.value || '';
+  }
+
+  return (node.childNodes || []).map(textContent).join('');
+};
+
 const truncateChildNodes = (
   childNodes: PreviewNode[],
   remainingCharacters: number
@@ -41,11 +54,23 @@ const truncateChildNodes = (
 export const prepareRichPreviewHtml = (
   sanitizedContent: string,
   maximumCharacters: number
-): string => {
+): RichPreviewContent => {
+  const fullFragment = parseFragment(sanitizedContent) as unknown as PreviewNode;
+  const visibleText = textContent(fullFragment);
   const fragment = parseFragment(sanitizedContent) as unknown as PreviewNode;
   const childNodes = fragment.childNodes || [];
+  const visibleLimit = Math.max(0, maximumCharacters);
 
-  truncateChildNodes(childNodes, Math.max(0, maximumCharacters));
+  truncateChildNodes(childNodes, visibleLimit);
 
-  return serialize(fragment as never);
+  return {
+    content: serialize(fragment as never),
+    overflowHtml: visibleText
+      .slice(visibleLimit)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;'),
+  };
 };
