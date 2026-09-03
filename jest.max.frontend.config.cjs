@@ -10,6 +10,7 @@ module.exports = {
   testMatch: [
     '<rootDir>/apps/frontend/src/components/new-launch/max.marks.spec.ts',
     '<rootDir>/apps/frontend/src/components/new-launch/providers/high.order.limits.spec.ts',
+    '<rootDir>/apps/frontend/src/components/launches/rich.text.preview.spec.ts',
   ],
   transform: {
     '^.+\\.tsx?$': [

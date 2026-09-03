@@ -10,26 +10,28 @@ import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validatio
 
 export const GeneralPreviewComponent: FC<{
   maximumCharacters?: number;
+  transformContent?: (content: string, maximumCharacters: number) => string;
+  previewClassName?: string;
 }> = (props) => {
   const { value: topValue, integration } = useIntegration();
   const current = useLaunchStore((state) => state.current);
   const mediaDir = useMediaDirectory();
 
+  const maximumCharacters = props.maximumCharacters || 10000;
   const renderContent = topValue.map((p) => {
-    const newContent = stripHtmlValidation(
-      'normal',
-      p.content.replace(
-        /<span.*?data-mention-id="([.\s\S]*?)"[.\s\S]*?>([.\s\S]*?)<\/span>/gi,
-        (match, match1, match2) => {
-          return `[[[${match2}]]]`;
-        }
-      ),
-      true
+    const contentWithMentionTokens = p.content.replace(
+      /<span.*?data-mention-id="([.\s\S]*?)"[.\s\S]*?>([.\s\S]*?)<\/span>/gi,
+      (match, match1, match2) => {
+        return `[[[${match2}]]]`;
+      }
     );
+    const newContent =
+      props.transformContent?.(contentWithMentionTokens, maximumCharacters) ||
+      stripHtmlValidation('normal', contentWithMentionTokens, true);
 
     const { start, end } = textSlicer(
       integration?.identifier || '',
-      props.maximumCharacters || 10000,
+      props.transformContent ? Number.MAX_SAFE_INTEGER : maximumCharacters,
       newContent
     );
 
@@ -111,7 +113,10 @@ export const GeneralPreviewComponent: FC<{
                 </div>
               </div>
               <div
-                className={clsx('text-wrap whitespace-pre', 'preview')}
+                className={clsx(
+                  'text-wrap whitespace-pre preview',
+                  props.previewClassName
+                )}
                 dangerouslySetInnerHTML={{
                   __html: value.text,
                 }}
