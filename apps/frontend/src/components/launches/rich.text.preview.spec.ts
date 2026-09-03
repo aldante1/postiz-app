@@ -24,4 +24,17 @@ describe('prepareRichPreviewHtml', () => {
       overflowHtml: 'fghij',
     });
   });
+  it('accounts for provider-visible block separators', () => {
+    expect(
+      prepareRichPreviewHtml(
+        '<p>ab</p><pre><code>cd</code></pre><p>ef</p>',
+        6,
+        () => 8
+      )
+    ).toEqual({
+      content: '<p>ab</p><pre><code>cd</code></pre>',
+      overflowHtml: 'ef',
+    });
+  });
+
 });

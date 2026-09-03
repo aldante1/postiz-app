@@ -53,13 +53,17 @@ const truncateChildNodes = (
 
 export const prepareRichPreviewHtml = (
   sanitizedContent: string,
-  maximumCharacters: number
+  maximumCharacters: number,
+  formattedVisibleLength?: (content: string) => number
 ): RichPreviewContent => {
   const fullFragment = parseFragment(sanitizedContent) as unknown as PreviewNode;
   const visibleText = textContent(fullFragment);
+  const formattingOverhead = formattedVisibleLength
+    ? Math.max(0, formattedVisibleLength(sanitizedContent) - visibleText.length)
+    : 0;
   const fragment = parseFragment(sanitizedContent) as unknown as PreviewNode;
   const childNodes = fragment.childNodes || [];
-  const visibleLimit = Math.max(0, maximumCharacters);
+  const visibleLimit = Math.max(0, maximumCharacters - formattingOverhead);
 
   truncateChildNodes(childNodes, visibleLimit);
 
