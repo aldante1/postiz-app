@@ -6,6 +6,7 @@ module.exports = {
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json'],
   testMatch: [
     '<rootDir>/libraries/nestjs-libraries/src/database/prisma/media/media.retention.spec.ts',
+    '<rootDir>/libraries/nestjs-libraries/src/database/prisma/media/media.usage.service.spec.ts',
   ],
   transform: {
     '^.+\\.tsx?$': [

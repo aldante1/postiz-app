@@ -6,6 +6,7 @@ import {
   CreationMethod,
   Post,
   State,
+  Prisma,
 } from '@prisma/client';
 import { GetPostsDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts.dto';
 import { GetPostsListDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts.list.dto';
@@ -511,6 +512,7 @@ export class PostsRepository {
   }
 
   async createOrUpdatePost(
+    tx: Prisma.TransactionClient,
     state: 'draft' | 'schedule' | 'now' | 'update',
     orgId: string,
     date: string,
@@ -568,7 +570,7 @@ export class PostsRepository {
       });
 
       posts.push(
-        await this._post.model.post.upsert({
+        await tx.post.upsert({
           where: {
             id: value.id || uuidv4(),
           },
@@ -586,7 +588,7 @@ export class PostsRepository {
       );
 
       if (posts.length === 1) {
-        await this._tagsPosts.model.tagsPosts.deleteMany({
+        await tx.tagsPosts.deleteMany({
           where: {
             post: {
               id: posts[0].id,
@@ -595,7 +597,7 @@ export class PostsRepository {
         });
 
         if (tags.length) {
-          const tagsList = await this._tags.model.tags.findMany({
+          const tagsList = await tx.tags.findMany({
             where: {
               orgId: orgId,
               name: {
@@ -605,7 +607,7 @@ export class PostsRepository {
           });
 
           if (tagsList.length) {
-            await this._post.model.post.update({
+            await tx.post.update({
               where: {
                 id: posts[posts.length - 1].id,
               },
@@ -626,7 +628,7 @@ export class PostsRepository {
 
     const previousPost = body.group
       ? (
-          await this._post.model.post.findFirst({
+          await tx.post.findFirst({
             where: {
               group: body.group,
               deletedAt: null,
@@ -640,7 +642,7 @@ export class PostsRepository {
       : undefined;
 
     if (body.group) {
-      await this._post.model.post.updateMany({
+      await tx.post.updateMany({
         where: {
           group: body.group,
           deletedAt: null,

@@ -55,6 +55,8 @@ import {
   isTooLong,
   providerVisibleLength,
 } from '@gitroom/nestjs-libraries/database/prisma/posts/post.limits';
+import { PrismaService } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
+import { MediaUsageService } from '@gitroom/nestjs-libraries/database/prisma/media/media.usage.service';
 
 type PostWithConditionals = Post & {
   integration?: Integration;
@@ -72,7 +74,9 @@ export class PostsService {
     private _shortLinkService: ShortLinkService,
     private _openaiService: OpenaiService,
     private _temporalService: TemporalService,
-    private _refreshIntegrationService: RefreshIntegrationService
+    private _refreshIntegrationService: RefreshIntegrationService,
+    private _prismaService: PrismaService,
+    private _mediaUsageService: MediaUsageService
   ) {}
 
   searchForMissingThreeHoursPosts() {
@@ -909,15 +913,26 @@ export class PostsService {
         content: removeLinks ? stripLinks(updateContent[i]) : updateContent[i],
       }));
 
-      const { posts } = await this._postRepository.createOrUpdatePost(
-        body.type,
-        orgId,
-        body.type === 'now' ? dayjs().format('YYYY-MM-DDTHH:mm:00') : body.date,
-        post,
-        body.tags,
-        creationMethod,
-        body.inter
-      );
+      const { posts } = await this._prismaService.$transaction(async (tx) => {
+        const canonicalPost = await this._mediaUsageService.lockAndCanonicalize(
+          tx,
+          orgId,
+          body.type,
+          post
+        );
+        return this._postRepository.createOrUpdatePost(
+          tx,
+          body.type,
+          orgId,
+          body.type === 'now'
+            ? dayjs().format('YYYY-MM-DDTHH:mm:00')
+            : body.date,
+          canonicalPost,
+          body.tags,
+          creationMethod,
+          body.inter
+        );
+      });
 
       if (!posts?.length) {
         return [] as any[];
