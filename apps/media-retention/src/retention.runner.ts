@@ -658,17 +658,11 @@ export class RetentionRunner {
         continue;
       }
       if (initialAction === 'error') {
-        const message = `media ${selected.id}: preview missing and original missing`;
-        if (
-          options.mode === 'apply' &&
-          !(
-            selected.retentionState === MediaRetentionState.STAGED &&
-            selected.archivePreviewPath
-          )
-        ) {
-          throw new Error(message);
-        }
-        this.recordError(result, evidence, message);
+        this.recordError(
+          result,
+          evidence,
+          `media ${selected.id}: preview missing and original missing`
+        );
         continue;
       }
 

@@ -14,7 +14,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import sharp from 'sharp';
-import { parseArgs } from './main';
+import { main, parseArgs } from './main';
 import { OrphanSweep } from './orphan.sweep';
 import {
   PreviewWriter,
@@ -218,6 +218,84 @@ describe('parseArgs', () => {
     expect(() => parseArgs(['--orphans', '--apply-orphans'])).toThrow('cannot be combined');
     expect(() => parseArgs(['--older-than-days', '0'])).toThrow('positive integer');
     expect(() => parseArgs(['--unknown'])).toThrow('unknown argument');
+  });
+});
+
+describe('main', () => {
+  it('emits the complete report before failing a run with candidate errors', async () => {
+    const output: string[] = [];
+    const metrics = {
+      candidates: 1,
+      skipped: 1,
+      staged: 0,
+      purged: 0,
+      bytesFreed: 0,
+      projectedBytesFreed: 0,
+      errors: ['media m1: preview missing and original missing'],
+      candidateEvidence: [{
+        mediaId: 'm1',
+        originalBytes: 0,
+        projectedBytesFreed: 0,
+        preview: null,
+        decision: 'error' as const,
+        skipReason: 'media m1: preview missing and original missing',
+        errors: ['media m1: preview missing and original missing'],
+      }],
+    };
+    const runner = {
+      orphanReport: null,
+      run: jest.fn().mockResolvedValue(metrics),
+    };
+    const prisma = {
+      $connect: jest.fn().mockResolvedValue(undefined),
+      $disconnect: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(main([], {
+      prisma,
+      runner,
+      writeOutput: (value) => output.push(value),
+    })).rejects.toThrow('completed with 1 error');
+
+    expect(JSON.parse(output.join(''))).toEqual(
+      expect.objectContaining({ metrics })
+    );
+    expect(prisma.$disconnect).toHaveBeenCalledTimes(1);
+  });
+  it('emits the orphan report before failing on an orphan processing error', async () => {
+    const output: string[] = [];
+    const metrics = {
+      candidates: 0,
+      skipped: 0,
+      staged: 0,
+      purged: 0,
+      bytesFreed: 0,
+      projectedBytesFreed: 0,
+      errors: [],
+      candidateEvidence: [],
+    };
+    const runner = {
+      orphanReport: {
+        files: [],
+        bytesFreed: 0,
+        errors: ['orphan sweep: cannot inspect candidate'],
+      },
+      run: jest.fn().mockResolvedValue(metrics),
+    };
+    const prisma = {
+      $connect: jest.fn().mockResolvedValue(undefined),
+      $disconnect: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(main([], {
+      prisma,
+      runner,
+      writeOutput: (value) => output.push(value),
+    })).rejects.toThrow('completed with 1 error');
+
+    expect(JSON.parse(output.join('')).orphanErrors).toEqual(
+      runner.orphanReport.errors
+    );
   });
 });
 
@@ -641,16 +719,54 @@ describe('RetentionRunner', () => {
   });
 
   it.each(['ACTIVE', 'STAGED'] as const)(
-    'fails %s apply when both preview and original are missing',
+    'records %s as a candidate error when preview and original are missing',
     async (retentionState) => {
       db.mediaRows = [media({ retentionState })];
-      await expect(makeRunner().run({
+
+      const result = await makeRunner().run({
         mode: 'apply',
         orphanMode: 'off',
         olderThanDays: 30,
-      })).rejects.toThrow('preview missing and original missing');
+      });
+
+      expect(result.errors).toEqual([
+        'media m1: preview missing and original missing',
+      ]);
+      expect(result.candidateEvidence[0].decision).toBe('error');
     }
   );
+
+  it('continues after ACTIVE has neither file and purges a later candidate', async () => {
+    db.mediaRows = [
+      media(),
+      media({
+        id: 'm2',
+        name: 'm2.png',
+        path: `${FRONTEND_URL}/uploads/m2.png`,
+      }),
+    ];
+    db.postRows = [publishedPost({
+      id: 'post-2',
+      image: JSON.stringify([{
+        id: 'm2',
+        path: `${FRONTEND_URL}/uploads/m2.png`,
+      }]),
+    })];
+    writeFileSync(join(uploads, 'm2.png'), 'source');
+
+    const result = await makeRunner().run({
+      mode: 'apply',
+      orphanMode: 'off',
+      olderThanDays: 30,
+    });
+
+    expect(result.candidates).toBe(2);
+    expect(result.purged).toBe(1);
+    expect(result.errors).toEqual([
+      'media m1: preview missing and original missing',
+    ]);
+    expect(db.mediaRows[1].retentionState).toBe('PURGED');
+  });
 
   it('skips an external URL without touching it', async () => {
     db.mediaRows = [media({ path: 'https://cdn.example/m1.png' })];

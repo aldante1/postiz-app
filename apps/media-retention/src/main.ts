@@ -5,14 +5,31 @@ import { randomUUID } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 import { PreviewWriter } from './preview.writer';
-import { RetentionDatabase } from './orphan.sweep';
+import { OrphanSweepResult, RetentionDatabase } from './orphan.sweep';
 import {
   RetentionOptions,
+  RetentionResult,
   RetentionRunner,
 } from './retention.runner';
 
 export interface CliOptions extends RetentionOptions {
   reportPath?: string;
+}
+
+interface PrismaLifecycle {
+  $connect(): Promise<void>;
+  $disconnect(): Promise<void>;
+}
+
+interface CliRunner {
+  run(options: RetentionOptions): Promise<RetentionResult>;
+  orphanReport: OrphanSweepResult | null;
+}
+
+export interface MainDependencies {
+  prisma?: PrismaLifecycle;
+  runner?: CliRunner;
+  writeOutput?: (value: string) => void;
 }
 
 const cliOptionsSchema = z.object({
@@ -127,24 +144,34 @@ async function writeReport(filePath: string, report: object): Promise<void> {
   await rename(tempPath, absolutePath);
 }
 
-export async function main(argv = process.argv.slice(2)): Promise<void> {
+export async function main(
+  argv = process.argv.slice(2),
+  dependencies: MainDependencies = {}
+): Promise<void> {
   const options = parseArgs(argv);
-  const uploadDirectory = process.env.UPLOAD_DIRECTORY;
-  const frontendUrl = process.env.FRONTEND_URL;
-  if (!uploadDirectory || !frontendUrl) {
-    throw new Error('UPLOAD_DIRECTORY and FRONTEND_URL are required');
+  const prisma = dependencies.prisma ?? new PrismaClient();
+  let runner = dependencies.runner;
+  if (!runner) {
+    const uploadDirectory = process.env.UPLOAD_DIRECTORY;
+    const frontendUrl = process.env.FRONTEND_URL;
+    if (!uploadDirectory || !frontendUrl) {
+      throw new Error('UPLOAD_DIRECTORY and FRONTEND_URL are required');
+    }
+    // The CLI uses a deliberately narrow, testable view of Prisma's generated API.
+    const retentionDatabase = prisma as unknown as RetentionDatabase;
+    const previewWriter = new PreviewWriter({ uploadDirectory, frontendUrl });
+    runner = new RetentionRunner({
+      prisma: retentionDatabase,
+      previewWriter,
+      uploadDirectory,
+      frontendUrl,
+    });
   }
-
-  const prisma = new PrismaClient();
-  // The CLI uses a deliberately narrow, testable view of Prisma's generated API.
-  const retentionDatabase = prisma as unknown as RetentionDatabase;
-  const previewWriter = new PreviewWriter({ uploadDirectory, frontendUrl });
-  const runner = new RetentionRunner({
-    prisma: retentionDatabase,
-    previewWriter,
-    uploadDirectory,
-    frontendUrl,
-  });
+  const writeOutput =
+    dependencies.writeOutput ??
+    ((value: string) => {
+      process.stdout.write(value);
+    });
 
   try {
     await prisma.$connect();
@@ -161,11 +188,21 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       },
       metrics,
       orphans: runner.orphanReport?.files ?? [],
+      orphanErrors: runner.orphanReport?.errors ?? [],
     };
     if (options.reportPath) {
       await writeReport(options.reportPath, report);
     } else {
-      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+      writeOutput(`${JSON.stringify(report, null, 2)}\n`);
+    }
+    const runErrors = new Set([
+      ...metrics.errors,
+      ...(runner.orphanReport?.errors ?? []),
+    ]);
+    if (runErrors.size > 0) {
+      throw new Error(
+        `media retention completed with ${runErrors.size} error${runErrors.size === 1 ? '' : 's'}`
+      );
     }
   } finally {
     await prisma.$disconnect();
