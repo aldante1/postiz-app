@@ -1,0 +1,19 @@
+{
+  "name": "@postiz/media-retention",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "tsup src/main.ts --format cjs --platform node --target node22 --out-dir dist --clean --sourcemap",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@prisma/client": "6.5.0",
+    "dotenv": "^16.5.0",
+    "sharp": "^0.33.4",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.0",
+    "typescript": "5.5.4"
+  }
+}

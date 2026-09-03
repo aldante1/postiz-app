@@ -851,6 +851,28 @@ importers:
 
   apps/frontend: {}
 
+  apps/media-retention:
+    dependencies:
+      '@prisma/client':
+        specifier: 6.5.0
+        version: 6.5.0(prisma@6.5.0(typescript@5.5.4))(typescript@5.5.4)
+      dotenv:
+        specifier: ^16.5.0
+        version: 16.6.1
+      sharp:
+        specifier: ^0.33.4
+        version: 0.33.5
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+    devDependencies:
+      tsup:
+        specifier: ^8.5.0
+        version: 8.5.1(@swc/core@1.5.7(@swc/helpers@0.5.15))(jiti@2.6.1)(postcss@8.5.8)(typescript@5.5.4)(yaml@2.8.3)
+      typescript:
+        specifier: 5.5.4
+        version: 5.5.4
+
   apps/orchestrator: {}
 
   apps/sdk:
