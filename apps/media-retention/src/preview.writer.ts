@@ -1,5 +1,7 @@
 import { execFile } from 'node:child_process';
 import {
+  chmod,
+  link,
   lstat,
   mkdir,
   open,
@@ -86,8 +88,10 @@ function missingFile(error: unknown): boolean {
 
 async function ensureDirectoryComponent(
   root: string,
-  current: string
+  current: string,
+  mode: number
 ): Promise<void> {
+  let created = false;
   try {
     const stat = await lstat(current);
     if (stat.isSymbolicLink() || !stat.isDirectory()) {
@@ -95,11 +99,17 @@ async function ensureDirectoryComponent(
     }
   } catch (error: unknown) {
     if (!missingFile(error)) throw error;
-    await mkdir(current, { mode: 0o700 });
-    const created = await lstat(current);
-    if (created.isSymbolicLink() || !created.isDirectory()) {
-      throw new Error(`unsafe retention directory: ${current}`);
-    }
+    await mkdir(current, { mode });
+    created = true;
+  }
+  if (created) await chmod(current, mode);
+  const stat = await lstat(current);
+  if (
+    stat.isSymbolicLink() ||
+    !stat.isDirectory() ||
+    (stat.mode & 0o777) !== mode
+  ) {
+    throw new Error(`unsafe retention directory: ${current}`);
   }
   const canonical = await realpath(current);
   if (!isInside(root, canonical) || canonical !== current) {
@@ -117,10 +127,10 @@ export async function ensureRetentionDirectories(
     throw new Error(`unsafe uploads directory: ${uploadDirectory}`);
   }
   const retention = join(root, '.retention');
-  await ensureDirectoryComponent(root, retention);
+  await ensureDirectoryComponent(root, retention, 0o755);
   if (!includeQuarantine) return { root, retention };
   const quarantine = join(retention, 'quarantine');
-  await ensureDirectoryComponent(root, quarantine);
+  await ensureDirectoryComponent(root, quarantine, 0o700);
   return { root, retention, quarantine };
 }
 
@@ -233,6 +243,30 @@ export async function previewLocation(
   };
 }
 
+export async function restoreQuarantinedFile(
+  uploadDirectory: string,
+  quarantinePath: string,
+  sourcePath: string
+): Promise<void> {
+  const directories = await ensureRetentionDirectories(uploadDirectory, true);
+  const quarantined = await inspectContainedFile(
+    directories.root,
+    quarantinePath
+  );
+  if (dirname(quarantined.path) !== directories.quarantine) {
+    throw new Error(`unsafe quarantine restore path: ${quarantinePath}`);
+  }
+  const sourceParent = await realpath(dirname(sourcePath));
+  if (
+    sourceParent !== dirname(sourcePath) ||
+    !isInside(directories.root, sourceParent)
+  ) {
+    throw new Error(`unsafe quarantine restore target: ${sourcePath}`);
+  }
+  await link(quarantined.path, sourcePath);
+  await unlink(quarantined.path);
+}
+
 export async function quarantineAndUnlink(
   uploadDirectory: string,
   source: FileIdentity
@@ -255,14 +289,19 @@ export async function quarantineAndUnlink(
     return source.size;
   } catch (error: unknown) {
     try {
-      await lstat(source.path);
-    } catch (sourceError: unknown) {
-      if (missingFile(sourceError)) {
-        const parent = await realpath(dirname(source.path));
-        if (isInside(directories.root, parent) && parent === dirname(source.path)) {
-          await rename(quarantinePath, source.path);
-        }
-      }
+      await restoreQuarantinedFile(
+        directories.root,
+        quarantinePath,
+        source.path
+      );
+    } catch (restoreError: unknown) {
+      const reason =
+        restoreError instanceof Error
+          ? restoreError.message
+          : 'unknown restore error';
+      const original =
+        error instanceof Error ? error.message : 'unknown quarantine error';
+      throw new Error(`${original}; quarantine restore failed: ${reason}`);
     }
     throw error;
   }

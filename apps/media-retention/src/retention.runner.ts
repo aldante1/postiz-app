@@ -173,6 +173,39 @@ export class RetentionRunner {
       });
   }
 
+  private previewLocation(
+    candidate: MediaRow,
+    sourcePath: string
+  ): Promise<PreviewResult> {
+    if (
+      candidate.retentionState === MediaRetentionState.STAGED &&
+      candidate.archivePreviewPath
+    ) {
+      const stored = candidate.archivePreviewPath;
+      const location = new URL(stored);
+      const jpgPath = `/uploads/.retention/${candidate.id}.jpg`;
+      const webpPath = `/uploads/.retention/${candidate.id}.webp`;
+      const kind =
+        location.pathname === jpgPath
+          ? 'jpg'
+          : location.pathname === webpPath
+          ? 'webp'
+          : null;
+      const filePath = expectedLocalUploadPath(
+        stored,
+        this.dependencies.frontendUrl,
+        this.dependencies.uploadDirectory
+      );
+      if (!kind || !filePath) {
+        return Promise.reject(
+          new Error(`media ${candidate.id} has an unsafe stored preview`)
+        );
+      }
+      return Promise.resolve({ publicUrl: stored, filePath, kind });
+    }
+    return this.dependencies.previewWriter.location(candidate, sourcePath);
+  }
+
   private async preflight(
     candidate: MediaRow,
     preparePreview: boolean
@@ -183,10 +216,7 @@ export class RetentionRunner {
       this.dependencies.uploadDirectory
     );
     if (!source) return null;
-    const expectedPreview = await this.dependencies.previewWriter.location(
-      candidate,
-      source.path
-    );
+    const expectedPreview = await this.previewLocation(candidate, source.path);
     const preview = await inspectLocalFile(
       expectedPreview.publicUrl,
       this.dependencies.frontendUrl,
@@ -233,10 +263,7 @@ export class RetentionRunner {
       return;
     }
 
-    const expectedPreview = await this.dependencies.previewWriter.location(
-      candidate,
-      source.path
-    );
+    const expectedPreview = await this.previewLocation(candidate, source.path);
     if (
       expectedPreview.filePath !== preflight.expectedPreview.filePath ||
       expectedPreview.publicUrl !== preflight.expectedPreview.publicUrl

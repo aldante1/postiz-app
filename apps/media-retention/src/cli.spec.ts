@@ -16,7 +16,10 @@ import { join } from 'node:path';
 import sharp from 'sharp';
 import { parseArgs } from './main';
 import { OrphanSweep } from './orphan.sweep';
-import { PreviewWriter } from './preview.writer';
+import {
+  PreviewWriter,
+  restoreQuarantinedFile,
+} from './preview.writer';
 import { RetentionRunner } from './retention.runner';
 
 const FRONTEND_URL = 'https://postiz.example';
@@ -219,6 +222,7 @@ describe('PreviewWriter', () => {
     expect(metadata.width).toBe(720);
     expect(metadata.height).toBe(360);
     expect(readdirSync(join(uploads, '.retention'))).toEqual(['m1.webp']);
+    expect(statSync(join(uploads, '.retention')).mode & 0o777).toBe(0o755);
   });
 
   it('uses a trusted local video thumbnail and does not invoke ffmpeg', async () => {
@@ -299,6 +303,27 @@ describe('PreviewWriter', () => {
     );
     expect(readdirSync(outside)).toEqual([]);
   });
+  it('does not overwrite a late replacement while restoring quarantine', async () => {
+    const retentionDirectory = join(uploads, '.retention');
+    const quarantineDirectory = join(retentionDirectory, 'quarantine');
+    mkdirSync(retentionDirectory, { mode: 0o755 });
+    mkdirSync(quarantineDirectory, { mode: 0o700 });
+    const quarantined = join(quarantineDirectory, 'original.pending');
+    const source = join(uploads, 'source.bin');
+    writeFileSync(quarantined, 'original');
+    writeFileSync(source, 'replacement');
+
+    await expect(
+      restoreQuarantinedFile(
+        uploads,
+        realpathSync(quarantined),
+        realpathSync(source)
+      )
+    ).rejects.toThrow('EEXIST');
+    expect(readFileSync(source, 'utf8')).toBe('replacement');
+    expect(readFileSync(quarantined, 'utf8')).toBe('original');
+  });
+
 });
 
 describe('RetentionRunner', () => {
@@ -519,6 +544,28 @@ describe('RetentionRunner', () => {
     expect(db.mediaRows[0].retentionState).toBe('PURGED');
     expect(db.mediaRows[0].originalPurgedAt).toEqual(NOW);
   });
+  it('finalizes STAGED from its stored jpg preview when the original is gone', async () => {
+    const previewUrl = `${FRONTEND_URL}/uploads/.retention/m1.jpg`;
+    db.mediaRows = [media({
+      retentionState: 'STAGED',
+      archivePreviewPath: previewUrl,
+    })];
+    db.postRows = [publishedPost({
+      image: JSON.stringify([{ id: 'm1', path: previewUrl }]),
+    })];
+    writeFileSync(join(uploads, '.retention', 'm1.jpg'), 'preview');
+
+    const result = await makeRunner().run({
+      mode: 'apply',
+      orphanMode: 'off',
+      olderThanDays: 30,
+    });
+
+    expect(result.purged).toBe(1);
+    expect(db.mediaRows[0].retentionState).toBe('PURGED');
+    expect(db.mediaRows[0].archivePreviewPath).toBe(previewUrl);
+  });
+
   it('repairs missing archive metadata while recovering a staged row', async () => {
     const previewUrl = `${FRONTEND_URL}/uploads/.retention/m1.webp`;
     db.mediaRows = [media({ retentionState: 'STAGED', archivePreviewPath: null })];
@@ -871,5 +918,8 @@ describe('OrphanSweep', () => {
     expect(existsSync(orphan)).toBe(false);
     expect(existsSync(join(uploads, 'nested'))).toBe(true);
     expect(readdirSync(join(uploads, '.retention', 'quarantine'))).toEqual([]);
+    expect(
+      statSync(join(uploads, '.retention', 'quarantine')).mode & 0o777
+    ).toBe(0o700);
   });
 });
