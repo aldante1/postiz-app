@@ -1,10 +1,16 @@
-import { opendir, lstat, realpath, unlink } from 'node:fs/promises';
-import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
+import { MediaRetentionState } from '@prisma/client';
+import { lstat, opendir, realpath } from 'node:fs/promises';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import {
   collectScalarMediaReferences,
   normalizeMediaReference,
   parseMediaReferences,
 } from '@gitroom/nestjs-libraries/database/prisma/media/media.retention';
+import {
+  FileIdentity,
+  inspectContainedFile,
+  quarantineAndUnlink,
+} from './preview.writer';
 
 export type DatabaseQuery = Record<string, unknown>;
 
@@ -19,7 +25,7 @@ export interface MediaRow {
   organizationId: string;
   createdAt: Date;
   deletedAt: Date | null;
-  retentionState: 'ACTIVE' | 'STAGED' | 'PURGED';
+  retentionState: MediaRetentionState;
   originalPurgedAt: Date | null;
 }
 
@@ -86,7 +92,6 @@ export interface RetentionDatabase extends RetentionTransactionDatabase {
 export interface MalformedHolder {
   holder: 'Post.image' | 'Post.settings' | 'Sets.content';
   rowId: string;
-  raw: string;
 }
 
 export interface PublishedPostReference {
@@ -122,7 +127,7 @@ function readJsonHolder(
 ): Set<string> {
   if (!raw) return new Set<string>();
   const parsed = parseMediaReferences(raw);
-  if (!parsed.valid) malformed.push({ holder, rowId, raw });
+  if (!parsed.valid) malformed.push({ holder, rowId });
   return parsed.references;
 }
 
@@ -220,7 +225,7 @@ export async function discoverHolders(
   for (const row of mediaRows) {
     if (row.deletedAt) continue;
     const references = new Set<string>();
-    if (row.retentionState !== 'PURGED') {
+    if (row.retentionState !== MediaRetentionState.PURGED) {
       references.add(normalizeMediaReference(row.path));
     }
     for (const value of [row.thumbnail, row.archivePreviewPath]) {
@@ -258,23 +263,6 @@ export function holderMatchesMedia(
   );
 }
 
-export function malformedHolderMatches(
-  holder: MalformedHolder,
-  media: Pick<MediaRow, 'id' | 'path'>
-): boolean {
-  const normalizedPath = normalizeMediaReference(media.path);
-  let pathname = normalizedPath;
-  try {
-    pathname = new URL(normalizedPath).pathname;
-  } catch {
-    // A non-URL media path is still checked verbatim below.
-  }
-  return (
-    holder.raw.includes(media.id) ||
-    holder.raw.includes(normalizedPath) ||
-    holder.raw.includes(pathname)
-  );
-}
 
 export function expectedLocalUploadPath(
   publicUrl: string,
@@ -367,13 +355,7 @@ export class OrphanSweep {
       this.dependencies.frontendUrl,
       root
     );
-    const candidates: Array<{
-      path: string;
-      size: number;
-      mtimeMs: number;
-      dev: number;
-      ino: number;
-    }> = [];
+    const candidates: FileIdentity[] = [];
 
     const walk = async (directory: string, isRoot: boolean): Promise<void> => {
       const entries = await opendir(directory);
@@ -381,91 +363,77 @@ export class OrphanSweep {
         if (isRoot && entry.name === '.retention') continue;
         const filePath = resolve(directory, entry.name);
         if (entry.isDirectory()) {
-          await walk(filePath, false);
+          const stat = await lstat(filePath);
+          if (stat.isSymbolicLink() || !stat.isDirectory()) continue;
+          const canonical = await realpath(filePath);
+          const fromRoot = relative(root, canonical);
+          if (
+            canonical !== filePath ||
+            fromRoot === '..' ||
+            fromRoot.startsWith(`..${sep}`) ||
+            isAbsolute(fromRoot)
+          ) {
+            continue;
+          }
+          await walk(canonical, false);
           continue;
         }
         if (!entry.isFile() || livePaths.has(filePath)) continue;
-        const stat = await lstat(filePath);
-        if (
-          stat.isSymbolicLink() ||
-          !stat.isFile() ||
-          stat.mtimeMs > cutoff
-        ) {
-          continue;
+        try {
+          const candidate = await inspectContainedFile(root, filePath);
+          if (candidate.mtimeMs <= cutoff) candidates.push(candidate);
+        } catch {
+          // Symlinks and entries changed while traversing are never candidates.
         }
-        candidates.push({
-          path: filePath,
-          size: stat.size,
-          mtimeMs: stat.mtimeMs,
-          dev: stat.dev,
-          ino: stat.ino,
-        });
       }
     };
     await walk(root, true);
     candidates.sort((left, right) => left.path.localeCompare(right.path));
 
     const files: OrphanFileReport[] = [];
-    const errors: string[] = [];
+    const errorSet = new Set<string>();
+    const reportMalformed = (snapshot: HolderSnapshot): void => {
+      for (const malformed of snapshot.malformed) {
+        errorSet.add(
+          `${malformed.holder} ${malformed.rowId} is malformed; orphan mutation disabled`
+        );
+      }
+    };
+    reportMalformed(initialSnapshot);
     let bytesFreed = 0;
     for (const candidate of candidates) {
       let deleted = false;
       if (options.mode === 'apply') {
         const snapshot = await discoverHolders(this.dependencies.prisma);
+        reportMalformed(snapshot);
         const refreshedLivePaths = holderLivePaths(
           snapshot,
           this.dependencies.frontendUrl,
           root
         );
-        const affectedMalformed = snapshot.malformed.find((holder) => {
-          const publicPath = `/uploads/${relative(root, candidate.path)
-            .split(sep)
-            .join('/')}`;
-          if (
-            holder.raw.includes(publicPath) ||
-            holder.raw.includes(basename(candidate.path))
-          ) {
-            return true;
-          }
-          for (const [mediaId, media] of snapshot.mediaById) {
-            const mediaPath = expectedLocalUploadPath(
-              media.path,
-              this.dependencies.frontendUrl,
-              root
-            );
-            if (mediaPath === candidate.path && holder.raw.includes(mediaId)) {
-              return true;
-            }
-          }
-          return false;
-        });
-        if (affectedMalformed) {
-          errors.push(
-            `${affectedMalformed.holder} ${affectedMalformed.rowId} is malformed; kept orphan candidate ${candidate.path}`
-          );
+        if (snapshot.malformed.length > 0) {
+          // Any unparseable holder may hide any Media reference.
         } else if (refreshedLivePaths.has(candidate.path)) {
-          errors.push(`orphan candidate became live before deletion: ${candidate.path}`);
+          errorSet.add(
+            `orphan candidate became live before deletion: ${candidate.path}`
+          );
         } else {
-          const current = await lstat(candidate.path);
-          if (
-            !current.isFile() ||
-            current.isSymbolicLink() ||
-            current.dev !== candidate.dev ||
-            current.ino !== candidate.ino ||
-            current.size !== candidate.size ||
-            current.mtimeMs !== candidate.mtimeMs
-          ) {
-            errors.push(`orphan candidate changed before deletion: ${candidate.path}`);
-          } else {
-            await unlink(candidate.path);
+          try {
+            const freed = await quarantineAndUnlink(root, candidate);
             deleted = true;
-            bytesFreed += candidate.size;
+            bytesFreed += freed;
+          } catch (error: unknown) {
+            const message =
+              error instanceof Error ? error.message : 'unknown filesystem error';
+            errorSet.add(
+              `unsafe orphan candidate kept before deletion: ${candidate.path}: ${message}`
+            );
           }
         }
       }
       files.push({ path: candidate.path, bytes: candidate.size, deleted });
     }
 
-    return { files, bytesFreed, errors };
+    return { files, bytesFreed, errors: [...errorSet] };
   }
 }

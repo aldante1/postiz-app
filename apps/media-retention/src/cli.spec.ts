@@ -7,6 +7,7 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -34,6 +35,7 @@ class FixtureDatabase {
   updates: Array<{ model: string; id: string; data: Row }> = [];
   events: string[] = [];
   holderReads = 0;
+  holderMutationRead = 2;
   afterFirstHolderRead?: () => void;
 
   private selected(rows: Row[], args: Row = {}) {
@@ -115,7 +117,9 @@ class FixtureDatabase {
 
   private noteHolderRead() {
     this.holderReads += 1;
-    if (this.holderReads === 2) this.afterFirstHolderRead?.();
+    if (this.holderReads === this.holderMutationRead) {
+      this.afterFirstHolderRead?.();
+    }
   }
 }
 
@@ -209,7 +213,7 @@ describe('PreviewWriter', () => {
 
     expect(result).toEqual({
       publicUrl: `${FRONTEND_URL}/uploads/.retention/m1.webp`,
-      filePath: join(uploads, '.retention', 'm1.webp'),
+      filePath: join(realpathSync(uploads), '.retention', 'm1.webp'),
       kind: 'webp',
     });
     expect(metadata.width).toBe(720);
@@ -253,10 +257,47 @@ describe('PreviewWriter', () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0]).toEqual([
-      '-threads', '1', '-ss', '0', '-i', source, '-frames:v', '1', '-vf', 'scale=720:-2',
+      '-threads', '1', '-ss', '0', '-i', realpathSync(source), '-frames:v', '1', '-vf', 'scale=720:-2',
       expect.stringMatching(/\.jpg$/),
     ]);
     expect((await sharp(result.filePath).metadata()).format).toBe('jpeg');
+  });
+  it('treats a stored .mp4 as video when current-schema Media.type is image', async () => {
+    const source = join(uploads, 'current-schema.mp4');
+    writeFileSync(source, 'video');
+    const jpeg = await sharp({
+      create: { width: 8, height: 8, channels: 3, background: 'green' },
+    }).jpeg().toBuffer();
+    const runFfmpeg = jest.fn(async (args: string[]) => {
+      writeFileSync(args.at(-1)!, jpeg);
+    });
+    const writer = new PreviewWriter({
+      uploadDirectory: uploads,
+      frontendUrl: FRONTEND_URL,
+      runFfmpeg,
+    });
+
+    const result = await writer.write(media({ type: 'image' }), source);
+
+    expect(result.kind).toBe('jpg');
+    expect(runFfmpeg).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a symlinked reserved preview directory without writing outside uploads', async () => {
+    const source = join(uploads, 'source.svg');
+    const outside = join(root, 'outside');
+    writeFileSync(source, '<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"/>');
+    mkdirSync(outside);
+    symlinkSync(outside, join(uploads, '.retention'));
+    const writer = new PreviewWriter({
+      uploadDirectory: uploads,
+      frontendUrl: FRONTEND_URL,
+    });
+
+    await expect(writer.write(media(), source)).rejects.toThrow(
+      'unsafe retention directory'
+    );
+    expect(readdirSync(outside)).toEqual([]);
   });
 });
 
@@ -270,20 +311,53 @@ describe('RetentionRunner', () => {
     uploads = join(root, 'uploads');
     mkdirSync(join(uploads, '.retention'), { recursive: true });
     db = new FixtureDatabase();
+    db.holderMutationRead = 3;
   });
 
   afterEach(() => rmSync(root, { recursive: true, force: true }));
 
-  const makeRunner = (previewWriter: Row = {
-    write: async (row: Row) => {
+  const makeRunner = (previewWriter: Row = {}) => {
+    const location = async (row: Row) => {
       const filePath = join(uploads, '.retention', `${row.id}.webp`);
-      writeFileSync(filePath, 'preview');
-      return { filePath, publicUrl: `${FRONTEND_URL}/uploads/.retention/${row.id}.webp`, kind: 'webp' };
-    },
-  }) => {
+      return {
+        filePath,
+        publicUrl: `${FRONTEND_URL}/uploads/.retention/${row.id}.webp`,
+        kind: 'webp',
+      };
+    };
+    const defaultWriter = {
+      location,
+      prepare: async (row: Row) => {
+        const result = await location(row);
+        const tempPath = join(uploads, '.retention', `.${row.id}.prepared.webp`);
+        writeFileSync(tempPath, 'preview');
+        const stat = statSync(tempPath);
+        return {
+          tempPath,
+          result,
+          identity: {
+            path: realpathSync(tempPath),
+            size: stat.size,
+            device: stat.dev,
+            inode: stat.ino,
+            mtimeMs: stat.mtimeMs,
+          },
+        };
+      },
+      publish: async (prepared: Row) => {
+        writeFileSync(prepared.result.filePath, readFileSync(prepared.tempPath));
+        rmSync(prepared.tempPath);
+        return prepared.result;
+      },
+      discard: async (prepared: Row) =>
+        rmSync(prepared.tempPath, { force: true }),
+    };
     // The fixture implements the narrow runtime delegates but keeps generic test rows.
     const prisma = db as unknown as ConstructorParameters<typeof RetentionRunner>[0]['prisma'];
-    const writer = previewWriter as unknown as ConstructorParameters<typeof RetentionRunner>[0]['previewWriter'];
+    const writer = {
+      ...defaultWriter,
+      ...previewWriter,
+    } as unknown as ConstructorParameters<typeof RetentionRunner>[0]['previewWriter'];
     return new RetentionRunner({
       prisma,
       previewWriter: writer,
@@ -330,14 +404,64 @@ describe('RetentionRunner', () => {
 
     await makeRunner().run({ mode: 'apply', orphanMode: 'off', olderThanDays: 30 });
 
-    expect(db.events[0]).toBe('for-update');
-    expect(db.events.indexOf('for-update')).toBeLessThan(
-      db.events.indexOf('holder-read')
+    const lockIndex = db.events.indexOf('for-update');
+    expect(db.events.indexOf('holder-read')).toBeLessThan(lockIndex);
+    expect(lockIndex).toBeLessThan(
+      db.events.indexOf('holder-read', lockIndex + 1)
     );
-    expect(db.events.indexOf('holder-read')).toBeLessThan(
-      db.events.indexOf('media-update')
+    expect(lockIndex).toBeLessThan(db.events.indexOf('media-update'));
+  });
+  it('generates the preview before locking but publishes it only after revalidation', async () => {
+    db.mediaRows = [media()];
+    db.postRows = [publishedPost()];
+    const source = join(uploads, 'm1.png');
+    const finalPath = join(uploads, '.retention', 'm1.webp');
+    const tempPath = join(uploads, '.retention', '.prepared.webp');
+    writeFileSync(source, 'source');
+    const writer = {
+      location: async () => ({
+        publicUrl: `${FRONTEND_URL}/uploads/.retention/m1.webp`,
+        filePath: finalPath,
+        kind: 'webp',
+      }),
+      prepare: async () => {
+        db.events.push('preview-prepare');
+        writeFileSync(tempPath, 'preview');
+        return {
+          tempPath,
+          result: {
+            publicUrl: `${FRONTEND_URL}/uploads/.retention/m1.webp`,
+            filePath: finalPath,
+            kind: 'webp',
+          },
+        };
+      },
+      publish: async (prepared: Row) => {
+        db.events.push('preview-publish');
+        writeFileSync(finalPath, readFileSync(tempPath));
+        rmSync(tempPath);
+        return prepared.result;
+      },
+      discard: async () => rmSync(tempPath, { force: true }),
+      write: async () => {
+        throw new Error('runner must use two-phase preview generation');
+      },
+    };
+
+    await makeRunner(writer).run({
+      mode: 'apply',
+      orphanMode: 'off',
+      olderThanDays: 30,
+    });
+
+    expect(db.events.indexOf('preview-prepare')).toBeLessThan(
+      db.events.indexOf('for-update')
+    );
+    expect(db.events.indexOf('for-update')).toBeLessThan(
+      db.events.indexOf('preview-publish')
     );
   });
+
 
   it('runs ACTIVE through preview, published JSON rewrite, STAGED, unlink, and PURGED', async () => {
     db.mediaRows = [media()];
@@ -362,7 +486,7 @@ describe('RetentionRunner', () => {
     db.postRows = [publishedPost()];
     writeFileSync(join(uploads, 'm1.png'), 'source');
     writeFileSync(join(uploads, '.retention', 'm1.webp'), 'preview');
-    const previewWriter = { write: jest.fn(async () => {
+    const previewWriter = { prepare: jest.fn(async () => {
       throw new Error('preview must not be regenerated');
     }) };
 
@@ -374,7 +498,7 @@ describe('RetentionRunner', () => {
 
     expect(result.staged).toBe(1);
     expect(result.purged).toBe(1);
-    expect(previewWriter.write).not.toHaveBeenCalled();
+    expect(previewWriter.prepare).not.toHaveBeenCalled();
   });
 
 
@@ -464,6 +588,52 @@ describe('RetentionRunner', () => {
     expect(db.updates).toEqual([]);
   });
 
+  it('does not stage when a published field would retain an original-path occurrence', async () => {
+    db.mediaRows = [media()];
+    db.postRows = [publishedPost({
+      image: JSON.stringify([{
+        id: 'm1',
+        path: `${FRONTEND_URL}/uploads/m1.png`,
+        source: `${FRONTEND_URL}/uploads/m1.png`,
+      }]),
+    })];
+    writeFileSync(join(uploads, 'm1.png'), 'source');
+
+    const result = await makeRunner().run({
+      mode: 'apply',
+      orphanMode: 'off',
+      olderThanDays: 30,
+    });
+
+    expect(result.staged).toBe(0);
+    expect(result.errors).toEqual([
+      expect.stringContaining('unrewritten original path'),
+    ]);
+    expect(db.mediaRows[0].retentionState).toBe('ACTIVE');
+    expect(db.updates).toEqual([]);
+  });
+
+  it('repairs a partially rewritten STAGED published entry before purge', async () => {
+    const previewUrl = `${FRONTEND_URL}/uploads/.retention/m1.webp`;
+    db.mediaRows = [media({
+      retentionState: 'STAGED',
+      archivePreviewPath: previewUrl,
+    })];
+    db.postRows = [publishedPost()];
+    writeFileSync(join(uploads, 'm1.png'), 'source');
+    writeFileSync(join(uploads, '.retention', 'm1.webp'), 'preview');
+
+    const result = await makeRunner().run({
+      mode: 'apply',
+      orphanMode: 'off',
+      olderThanDays: 30,
+    });
+
+    expect(result.purged).toBe(1);
+    expect(db.postRows[0].image).toContain(previewUrl);
+    expect(db.postRows[0].image).not.toContain('/uploads/m1.png');
+  });
+
   it('ignores soft-deleted Post, Integration, agency, OAuth app, and Media holders', async () => {
     const candidate = media({ deletedAt: new Date('2026-08-01T00:00:00Z') });
     db.mediaRows = [candidate, media({ id: 'm2', path: `${FRONTEND_URL}/uploads/m2.png`, thumbnail: candidate.path, deletedAt: NOW, createdAt: NOW })];
@@ -478,9 +648,9 @@ describe('RetentionRunner', () => {
     expect(result.purged).toBe(1);
   });
 
-  it('reports malformed affected holder JSON and performs no mutation', async () => {
+  it('conservatively blocks on any malformed holder JSON', async () => {
     db.mediaRows = [media()];
-    db.postRows = [publishedPost({ image: '{"id":"m1"' })];
+    db.postRows = [publishedPost({ image: '{"id":"unrelated"' })];
     writeFileSync(join(uploads, 'm1.png'), 'source');
 
     const result = await makeRunner().run({ mode: 'apply', orphanMode: 'off', olderThanDays: 30 });
@@ -627,13 +797,13 @@ describe('OrphanSweep', () => {
     expect(result.files).toEqual([]);
     expect(existsSync(held)).toBe(true);
   });
-  it('keeps an orphan whose malformed holder still names its Media id', async () => {
+  it('keeps every orphan when any holder JSON is malformed', async () => {
     const candidate = oldFile('malformed-held.png');
     db.mediaRows = [media({
       path: `${FRONTEND_URL}/uploads/malformed-held.png`,
       retentionState: 'PURGED',
     })];
-    db.setRows = [{ id: 'broken-set', content: '{\"id\":\"m1\"' }];
+    db.setRows = [{ id: 'broken-set', content: '{"id":"unrelated"' }];
 
     const result = await makeSweep().run({ mode: 'apply', olderThanDays: 30 });
 
@@ -669,6 +839,27 @@ describe('OrphanSweep', () => {
     expect(result.errors).toEqual([expect.stringContaining('became live')]);
   });
 
+  it('does not follow a candidate parent replaced by a symlink before deletion', async () => {
+    const candidate = oldFile('swapped/orphan.bin', 'inside');
+    const canonicalCandidate = realpathSync(candidate);
+    const outside = join(root, 'outside');
+    mkdirSync(outside);
+    const external = join(outside, 'orphan.bin');
+    writeFileSync(external, 'inside');
+    db.afterFirstHolderRead = () => {
+      rmSync(join(uploads, 'swapped'), { recursive: true });
+      symlinkSync(outside, join(uploads, 'swapped'));
+    };
+
+    const result = await makeSweep().run({ mode: 'apply', olderThanDays: 30 });
+
+    expect(result.files).toEqual([
+      { path: canonicalCandidate, bytes: 6, deleted: false },
+    ]);
+    expect(readFileSync(external, 'utf8')).toBe('inside');
+    expect(result.errors).toEqual([expect.stringContaining('unsafe')]);
+  });
+
   it('deletes one revalidated file without deleting directories', async () => {
     const orphan = oldFile('nested/orphan.bin', '1234');
     const canonicalOrphan = realpathSync(orphan);
@@ -679,5 +870,6 @@ describe('OrphanSweep', () => {
     expect(result.bytesFreed).toBe(4);
     expect(existsSync(orphan)).toBe(false);
     expect(existsSync(join(uploads, 'nested'))).toBe(true);
+    expect(readdirSync(join(uploads, '.retention', 'quarantine'))).toEqual([]);
   });
 });

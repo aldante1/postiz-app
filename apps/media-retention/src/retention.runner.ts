@@ -1,6 +1,8 @@
-import { lstat, unlink } from 'node:fs/promises';
+import { MediaRetentionState } from '@prisma/client';
+import { lstat } from 'node:fs/promises';
 import {
   normalizeMediaReference,
+  parseMediaReferences,
   recoveryAction,
   replaceMediaReference,
   toLocalUploadPath,
@@ -9,14 +11,20 @@ import {
   discoverHolders,
   expectedLocalUploadPath,
   holderMatchesMedia,
-  malformedHolderMatches,
   MediaRow,
   OrphanSweep,
   OrphanSweepResult,
+  PublishedPostReference,
   RetentionDatabase,
   RetentionTransactionDatabase,
 } from './orphan.sweep';
-import { PreviewResult, previewLocation } from './preview.writer';
+import {
+  FileIdentity,
+  PreparedPreview,
+  PreviewResult,
+  quarantineAndUnlink,
+  sameFileIdentity,
+} from './preview.writer';
 
 export interface RetentionOptions {
   mode: 'dry-run' | 'apply';
@@ -35,7 +43,10 @@ export interface RetentionResult {
 }
 
 interface PreviewWriterLike {
-  write(media: MediaRow, sourcePath: string): Promise<PreviewResult>;
+  location(media: MediaRow, sourcePath: string): Promise<PreviewResult>;
+  prepare(media: MediaRow, sourcePath: string): Promise<PreparedPreview>;
+  publish(prepared: PreparedPreview): Promise<PreviewResult>;
+  discard(prepared: PreparedPreview): Promise<void>;
 }
 
 interface RetentionRunnerDependencies {
@@ -47,13 +58,29 @@ interface RetentionRunnerDependencies {
   orphanSweep?: OrphanSweep;
 }
 
-interface FileState {
+interface FileState extends FileIdentity {
   exists: boolean;
-  path: string;
-  size: number;
-  device: number;
-  inode: number;
-  mtimeMs: number;
+}
+
+interface CandidatePreflight {
+  source: FileState;
+  expectedPreview: PreviewResult;
+  preview: FileState;
+  prepared: PreparedPreview | null;
+}
+
+interface PostUpdate {
+  id: string;
+  data: Record<string, string>;
+}
+
+function missingFile(error: unknown): boolean {
+  return (
+    !!error &&
+    typeof error === 'object' &&
+    'code' in error &&
+    error.code === 'ENOENT'
+  );
 }
 
 async function inspectLocalFile(
@@ -81,12 +108,7 @@ async function inspectLocalFile(
       mtimeMs: stat.mtimeMs,
     };
   } catch (error: unknown) {
-    if (
-      error &&
-      typeof error === 'object' &&
-      'code' in error &&
-      error.code === 'ENOENT'
-    ) {
+    if (missingFile(error)) {
       return {
         exists: false,
         path: expectedPath,
@@ -98,6 +120,40 @@ async function inspectLocalFile(
     }
     throw error;
   }
+}
+
+function preparePublishedUpdates(
+  posts: PublishedPostReference[],
+  candidate: MediaRow,
+  previewUrl: string
+): PostUpdate[] {
+  const originalReference = normalizeMediaReference(candidate.path);
+  const updates: PostUpdate[] = [];
+  for (const post of posts) {
+    const data: Record<string, string> = {};
+    for (const field of ['image', 'settings'] as const) {
+      const raw = post[field];
+      if (!raw) continue;
+      const parsed = parseMediaReferences(raw);
+      if (!parsed.valid) {
+        throw new Error(`${field} became malformed`);
+      }
+      const hasOriginal = parsed.references.has(originalReference);
+      const hasMediaId = parsed.references.has(candidate.id);
+      if (hasOriginal && !hasMediaId) {
+        throw new Error('original path is not attached to a matching Media id');
+      }
+      if (!hasMediaId) continue;
+      const rewritten = replaceMediaReference(raw, candidate.id, previewUrl);
+      const verified = parseMediaReferences(rewritten);
+      if (!verified.valid || verified.references.has(originalReference)) {
+        throw new Error('unrewritten original path remains after candidate rewrite');
+      }
+      if (rewritten !== raw) data[field] = rewritten;
+    }
+    if (Object.keys(data).length > 0) updates.push({ id: post.id, data });
+  }
+  return updates;
 }
 
 export class RetentionRunner {
@@ -117,11 +173,46 @@ export class RetentionRunner {
       });
   }
 
+  private async preflight(
+    candidate: MediaRow,
+    preparePreview: boolean
+  ): Promise<CandidatePreflight | null> {
+    const source = await inspectLocalFile(
+      candidate.path,
+      this.dependencies.frontendUrl,
+      this.dependencies.uploadDirectory
+    );
+    if (!source) return null;
+    const expectedPreview = await this.dependencies.previewWriter.location(
+      candidate,
+      source.path
+    );
+    const preview = await inspectLocalFile(
+      expectedPreview.publicUrl,
+      this.dependencies.frontendUrl,
+      this.dependencies.uploadDirectory
+    );
+    if (!preview) return null;
+    const action = recoveryAction({
+      previewExists: preview.exists,
+      originalExists: source.exists,
+    });
+    let prepared: PreparedPreview | null = null;
+    if (preparePreview && action === 'regenerate') {
+      prepared = await this.dependencies.previewWriter.prepare(
+        candidate,
+        source.path
+      );
+    }
+    return { source, expectedPreview, preview, prepared };
+  }
+
   private async processCandidate(
     candidate: MediaRow,
     apply: boolean,
     result: RetentionResult,
-    prisma: RetentionTransactionDatabase
+    prisma: RetentionTransactionDatabase,
+    preflight: CandidatePreflight
   ): Promise<void> {
     const source = await inspectLocalFile(
       candidate.path,
@@ -132,7 +223,28 @@ export class RetentionRunner {
       result.skipped += 1;
       return;
     }
-    const expectedPreview = previewLocation(candidate, this.dependencies);
+    if (
+      apply &&
+      (source.exists !== preflight.source.exists ||
+        (source.exists && !sameFileIdentity(source, preflight.source)))
+    ) {
+      result.errors.push(`media ${candidate.id} original changed before lock`);
+      result.skipped += 1;
+      return;
+    }
+
+    const expectedPreview = await this.dependencies.previewWriter.location(
+      candidate,
+      source.path
+    );
+    if (
+      expectedPreview.filePath !== preflight.expectedPreview.filePath ||
+      expectedPreview.publicUrl !== preflight.expectedPreview.publicUrl
+    ) {
+      result.errors.push(`media ${candidate.id} preview location changed before lock`);
+      result.skipped += 1;
+      return;
+    }
     const preview = await inspectLocalFile(
       expectedPreview.publicUrl,
       this.dependencies.frontendUrl,
@@ -145,10 +257,8 @@ export class RetentionRunner {
     }
 
     const holders = await discoverHolders(prisma);
-    const malformed = holders.malformed.find((holder) =>
-      malformedHolderMatches(holder, candidate)
-    );
-    if (malformed) {
+    if (holders.malformed.length > 0) {
+      const malformed = holders.malformed[0];
       result.errors.push(
         `${malformed.holder} ${malformed.rowId} is malformed; media ${candidate.id} was not mutated`
       );
@@ -167,16 +277,16 @@ export class RetentionRunner {
       return;
     }
 
-    const originalReference = normalizeMediaReference(candidate.path);
-    const unrewritablePublishedReference = holders.publishedPosts.some(
-      (post) =>
-        post.references.has(originalReference) &&
-        !post.references.has(candidate.id)
-    );
-    if (unrewritablePublishedReference) {
-      result.errors.push(
-        `published holder references media ${candidate.id} by path without its id`
+    let postUpdates: PostUpdate[];
+    try {
+      postUpdates = preparePublishedUpdates(
+        holders.publishedPosts,
+        candidate,
+        expectedPreview.publicUrl
       );
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'invalid published holder';
+      result.errors.push(`media ${candidate.id}: ${message}`);
       result.skipped += 1;
       return;
     }
@@ -196,56 +306,43 @@ export class RetentionRunner {
 
     let previewResult = expectedPreview;
     if (action === 'regenerate') {
-      previewResult = await this.dependencies.previewWriter.write(
-        candidate,
-        source.path
+      if (!preflight.prepared) {
+        result.errors.push(
+          `media ${candidate.id}: preview disappeared before lock; retry required`
+        );
+        result.skipped += 1;
+        return;
+      }
+      previewResult = await this.dependencies.previewWriter.publish(
+        preflight.prepared
       );
+      preflight.prepared = null;
     }
 
-    if (candidate.retentionState === 'ACTIVE') {
-      for (const post of holders.publishedPosts) {
-        if (!post.references.has(candidate.id)) continue;
-        const data: Record<string, string> = {};
-        if (post.image) {
-          data.image = replaceMediaReference(
-            post.image,
-            candidate.id,
-            previewResult.publicUrl
-          );
-        }
-        if (post.settings) {
-          data.settings = replaceMediaReference(
-            post.settings,
-            candidate.id,
-            previewResult.publicUrl
-          );
-        }
-        if (Object.keys(data).length > 0) {
-          await prisma.post.update({
-            where: { id: post.id },
-            data,
-          });
-        }
-      }
+    for (const update of postUpdates) {
+      await prisma.post.update({
+        where: { id: update.id },
+        data: update.data,
+      });
+    }
+    if (candidate.retentionState === MediaRetentionState.ACTIVE) {
       await prisma.media.update({
-        where: { id: candidate.id, retentionState: 'ACTIVE' },
+        where: { id: candidate.id, retentionState: MediaRetentionState.ACTIVE },
         data: {
-          retentionState: 'STAGED',
+          retentionState: MediaRetentionState.STAGED,
           archivePreviewPath: previewResult.publicUrl,
         },
       });
       result.staged += 1;
     } else if (candidate.archivePreviewPath !== previewResult.publicUrl) {
       await prisma.media.update({
-        where: { id: candidate.id, retentionState: 'STAGED' },
+        where: { id: candidate.id, retentionState: MediaRetentionState.STAGED },
         data: { archivePreviewPath: previewResult.publicUrl },
       });
     }
 
     const refreshed = await discoverHolders(prisma);
-    const refreshedMalformed = refreshed.malformed.find((holder) =>
-      malformedHolderMatches(holder, candidate)
-    );
+    const originalReference = normalizeMediaReference(candidate.path);
     const pathStillLive = refreshed.publishedPosts.some((post) =>
       post.references.has(originalReference)
     );
@@ -256,10 +353,15 @@ export class RetentionRunner {
           holder.mediaId !== candidate.id &&
           holderMatchesMedia(holder.references, candidate)
       );
-    if (refreshedMalformed || pathStillLive || blockingReference) {
-      if (refreshedMalformed) {
+    if (
+      refreshed.malformed.length > 0 ||
+      pathStillLive ||
+      blockingReference
+    ) {
+      if (refreshed.malformed.length > 0) {
+        const malformed = refreshed.malformed[0];
         result.errors.push(
-          `${refreshedMalformed.holder} ${refreshedMalformed.rowId} became malformed before purge of media ${candidate.id}`
+          `${malformed.holder} ${malformed.rowId} became malformed before purge of media ${candidate.id}`
         );
       }
       result.skipped += 1;
@@ -267,29 +369,28 @@ export class RetentionRunner {
     }
 
     if (source.exists) {
-      const finalSource = await inspectLocalFile(
-        candidate.path,
-        this.dependencies.frontendUrl,
-        this.dependencies.uploadDirectory
-      );
-      if (
-        !finalSource?.exists ||
-        finalSource.path !== source.path ||
-        finalSource.device !== source.device ||
-        finalSource.inode !== source.inode ||
-        finalSource.size !== source.size ||
-        finalSource.mtimeMs !== source.mtimeMs
-      ) {
-        result.errors.push(`media ${candidate.id} original changed before unlink`);
+      try {
+        const freed = await quarantineAndUnlink(
+          this.dependencies.uploadDirectory,
+          source
+        );
+        result.bytesFreed += freed;
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : 'unknown filesystem error';
+        result.errors.push(
+          `media ${candidate.id} original changed before unlink: ${message}`
+        );
         result.skipped += 1;
         return;
       }
-      await unlink(source.path);
-      result.bytesFreed += source.size;
     }
     await prisma.media.update({
-      where: { id: candidate.id, retentionState: 'STAGED' },
-      data: { retentionState: 'PURGED', originalPurgedAt: this.now() },
+      where: { id: candidate.id, retentionState: MediaRetentionState.STAGED },
+      data: {
+        retentionState: MediaRetentionState.PURGED,
+        originalPurgedAt: this.now(),
+      },
     });
     result.purged += 1;
   }
@@ -325,7 +426,9 @@ export class RetentionRunner {
         : {};
       const candidate = await this.dependencies.prisma.media.findFirst({
         where: {
-          retentionState: { in: ['ACTIVE', 'STAGED'] },
+          retentionState: {
+            in: [MediaRetentionState.ACTIVE, MediaRetentionState.STAGED],
+          },
           createdAt: { lte: cutoff },
           ...(options.organizationId
             ? { organizationId: options.organizationId }
@@ -339,39 +442,108 @@ export class RetentionRunner {
       cursor = { createdAt: candidate.createdAt, id: candidate.id };
       result.candidates += 1;
 
+      const preflight = await this.preflight(candidate, false);
+      if (!preflight) {
+        result.skipped += 1;
+        continue;
+      }
+      const preliminaryHolders = await discoverHolders(
+        this.dependencies.prisma
+      );
+      if (preliminaryHolders.malformed.length > 0) {
+        const malformed = preliminaryHolders.malformed[0];
+        result.errors.push(
+          `${malformed.holder} ${malformed.rowId} is malformed; media ${candidate.id} was not mutated`
+        );
+        result.skipped += 1;
+        continue;
+      }
+      if (
+        holderMatchesMedia(preliminaryHolders.blockingReferences, candidate) ||
+        preliminaryHolders.mediaFieldReferences.some(
+          (holder) =>
+            holder.mediaId !== candidate.id &&
+            holderMatchesMedia(holder.references, candidate)
+        )
+      ) {
+        result.skipped += 1;
+        continue;
+      }
+      try {
+        preparePublishedUpdates(
+          preliminaryHolders.publishedPosts,
+          candidate,
+          preflight.expectedPreview.publicUrl
+        );
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : 'invalid published holder';
+        result.errors.push(`media ${candidate.id}: ${message}`);
+        result.skipped += 1;
+        continue;
+      }
+      if (
+        options.mode === 'apply' &&
+        recoveryAction({
+          previewExists: preflight.preview.exists,
+          originalExists: preflight.source.exists,
+        }) === 'regenerate'
+      ) {
+        preflight.prepared = await this.dependencies.previewWriter.prepare(
+          candidate,
+          preflight.source.path
+        );
+      }
+
       if (options.mode === 'dry-run') {
         await this.processCandidate(
           candidate,
           false,
           result,
-          this.dependencies.prisma
+          this.dependencies.prisma,
+          preflight
         );
         continue;
       }
 
-      await this.dependencies.prisma.$transaction(
-        async (transaction) => {
-          await transaction.$queryRaw<Array<{ id: string }>>`
-            SELECT "id"
-            FROM "Media"
-            WHERE "id" = ${candidate.id}
-            FOR UPDATE
-          `;
-          const locked = await transaction.media.findFirst({
-            where: { id: candidate.id },
-          });
-          if (
-            !locked ||
-            (locked.retentionState !== 'ACTIVE' &&
-              locked.retentionState !== 'STAGED')
-          ) {
-            result.skipped += 1;
-            return;
-          }
-          await this.processCandidate(locked, true, result, transaction);
-        },
-        { maxWait: 5_000, timeout: 30_000 }
-      );
+      try {
+        await this.dependencies.prisma.$transaction(
+          async (transaction) => {
+            await transaction.$queryRaw<Array<{ id: string }>>`
+              SELECT "id"
+              FROM "Media"
+              WHERE "id" = ${candidate.id}
+              FOR UPDATE
+            `;
+            const locked = await transaction.media.findFirst({
+              where: { id: candidate.id },
+            });
+            if (
+              !locked ||
+              (locked.retentionState !== MediaRetentionState.ACTIVE &&
+                locked.retentionState !== MediaRetentionState.STAGED) ||
+              locked.createdAt > cutoff ||
+              (options.organizationId &&
+                locked.organizationId !== options.organizationId)
+            ) {
+              result.skipped += 1;
+              return;
+            }
+            await this.processCandidate(
+              locked,
+              true,
+              result,
+              transaction,
+              preflight
+            );
+          },
+          { maxWait: 5_000, timeout: 15_000 }
+        );
+      } finally {
+        if (preflight.prepared) {
+          await this.dependencies.previewWriter.discard(preflight.prepared);
+        }
+      }
     }
 
     if (options.orphanMode !== 'off') {
@@ -388,4 +560,3 @@ export class RetentionRunner {
     return result;
   }
 }
-
