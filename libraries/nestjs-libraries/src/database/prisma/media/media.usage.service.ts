@@ -16,29 +16,27 @@ type LockedMedia = {
   deletedAt: Date | null;
 };
 
-function collectMediaIds(value: unknown, ids = new Set<string>()): Set<string> {
-  if (Array.isArray(value)) {
-    for (const entry of value) {
-      collectMediaIds(entry, ids);
+const MEDIA_SETTING_KEYS = ['main_image', 'thumbnail'] as const;
+
+function collectSettingsMediaIds(value: unknown): Set<string> {
+  const ids = new Set<string>();
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return ids;
+  }
+
+  const settings = value as Record<string, unknown>;
+  for (const key of MEDIA_SETTING_KEYS) {
+    const candidate = settings[key];
+    if (
+      typeof candidate === 'object' &&
+      candidate !== null &&
+      !Array.isArray(candidate)
+    ) {
+      const media = candidate as Record<string, unknown>;
+      if (typeof media.id === 'string' && typeof media.path === 'string') {
+        ids.add(media.id);
+      }
     }
-    return ids;
-  }
-
-  if (typeof value !== 'object' || value === null) {
-    return ids;
-  }
-
-  const record = value as Record<string, unknown>;
-
-  if (
-    typeof record.id === 'string' &&
-    (typeof record.path === 'string' || typeof record.url === 'string')
-  ) {
-    ids.add(record.id);
-  }
-
-  for (const entry of Object.values(record)) {
-    collectMediaIds(entry, ids);
   }
 
   return ids;
@@ -59,7 +57,7 @@ export class MediaUsageService {
     const imageIds = new Set(
       body.value.flatMap((value) => value.image.map((media) => media.id))
     );
-    const settingsIds = collectMediaIds(body.settings);
+    const settingsIds = collectSettingsMediaIds(body.settings);
     const mediaIds = [...new Set([...imageIds, ...settingsIds])].sort();
 
     if (!mediaIds.length) {
@@ -119,17 +117,37 @@ export class MediaUsageService {
     );
 
     let settings = body.settings;
-    if (settingsIds.size) {
-      let settingsJson = JSON.stringify(body.settings);
-      for (const mediaId of settingsIds) {
-        settingsJson = replaceMediaReference(
-          settingsJson,
-          mediaId,
-          canonicalPath.get(mediaId)!
+    if (
+      settingsIds.size &&
+      typeof body.settings === 'object' &&
+      body.settings !== null
+    ) {
+      const inputSettings = body.settings as unknown as Record<string, unknown>;
+      const canonicalSettings = { ...inputSettings };
+      for (const key of MEDIA_SETTING_KEYS) {
+        const candidate = inputSettings[key];
+        if (
+          typeof candidate !== 'object' ||
+          candidate === null ||
+          Array.isArray(candidate)
+        ) {
+          continue;
+        }
+        const mediaSetting = candidate as Record<string, unknown>;
+        if (
+          typeof mediaSetting.id !== 'string' ||
+          !settingsIds.has(mediaSetting.id)
+        ) {
+          continue;
+        }
+        const canonicalJson = replaceMediaReference(
+          JSON.stringify(mediaSetting),
+          mediaSetting.id,
+          canonicalPath.get(mediaSetting.id)!
         );
+        canonicalSettings[key] = JSON.parse(canonicalJson) as unknown;
       }
-      // The value came from serializing the already validated settings DTO above.
-      settings = JSON.parse(settingsJson) as unknown as PostBody['settings'];
+      settings = canonicalSettings as unknown as PostBody['settings'];
     }
 
     return {
@@ -199,12 +217,29 @@ export class MediaUsageService {
       const incomingImageIds = [
         ...new Set(value.image.map((media) => media.id)),
       ].sort();
-      const existingImageIds = [...collectMediaIds(existingImageValue)].sort();
+      const existingImageIds = new Set<string>();
+      if (!Array.isArray(existingImageValue)) {
+        unavailable();
+      }
+      for (const candidate of existingImageValue) {
+        if (
+          typeof candidate === 'object' &&
+          candidate !== null &&
+          !Array.isArray(candidate)
+        ) {
+          const persistedMedia = candidate as Record<string, unknown>;
+          if (typeof persistedMedia.id === 'string') {
+            existingImageIds.add(persistedMedia.id);
+          }
+        }
+      }
+      const sortedExistingImageIds = [...existingImageIds].sort();
       const existingSettingsIds = [
-        ...collectMediaIds(existingSettingsValue),
+        ...collectSettingsMediaIds(existingSettingsValue),
       ].sort();
       if (
-        JSON.stringify(incomingImageIds) !== JSON.stringify(existingImageIds) ||
+        JSON.stringify(incomingImageIds) !==
+          JSON.stringify(sortedExistingImageIds) ||
         JSON.stringify(incomingSettingsIds) !==
           JSON.stringify(existingSettingsIds)
       ) {

@@ -19,6 +19,7 @@ import { TypedSearchAttributes } from '@temporalio/common';
 import {
   organizationId,
 } from '@gitroom/nestjs-libraries/temporal/temporal.search.attribute';
+import { MediaService } from '@gitroom/nestjs-libraries/database/prisma/media/media.service';
 const parser = new Parser();
 
 interface WorkflowChannelsState {
@@ -64,7 +65,8 @@ export class AutopostService {
     private _autopostsRepository: AutopostRepository,
     private _temporalService: TemporalService,
     private _integrationService: IntegrationService,
-    private _postsService: PostsService
+    private _postsService: PostsService,
+    private _mediaService: MediaService
   ) {}
 
   async stopAll(org: string) {
@@ -267,6 +269,14 @@ export class AutopostService {
       state.integrations[0].organizationId
     );
 
+    const media = state.image
+      ? await this._mediaService.saveFile(
+          state.integrations[0].organizationId,
+          makeId(10),
+          state.image
+        )
+      : undefined;
+
     await this._postsService.createPost(state.integrations[0].organizationId, {
       date: nextTime + 'Z',
       order: makeId(10),
@@ -290,16 +300,7 @@ export class AutopostService {
               state.description.replace(/\n/g, '\n\n') +
               '\n\n' +
               state.load.url,
-            image: !state.image
-              ? []
-              : [
-                  {
-                    id: makeId(10),
-                    name: makeId(10),
-                    path: state.image,
-                    organizationId: state.integrations[0].organizationId,
-                  },
-                ],
+            image: media ? [media] : [],
           },
         ],
       })),

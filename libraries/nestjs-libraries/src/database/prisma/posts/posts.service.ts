@@ -932,6 +932,9 @@ export class PostsService {
           creationMethod,
           body.inter
         );
+      }, {
+        maxWait: 5_000,
+        timeout: 30_000,
       });
 
       if (!posts?.length) {

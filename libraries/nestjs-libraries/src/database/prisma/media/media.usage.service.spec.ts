@@ -204,6 +204,25 @@ describe('MediaUsageService', () => {
     });
   });
 
+  it('does not treat a Lemmy community id and url as Media', async () => {
+    const body = postBody({
+      value: [{ id: 'post-1', content: 'Lemmy post', image: [] }],
+      settings: {
+        __type: 'lemmy',
+        community: {
+          id: 'community-1',
+          url: 'https://lemmy.example/c/community',
+        },
+      },
+    });
+    const tx = transactionWith([]);
+
+    await expect(
+      service.lockAndCanonicalize(tx, orgId, 'schedule', body)
+    ).resolves.toBe(body);
+    expect(tx.$queryRaw).not.toHaveBeenCalled();
+  });
+
   it('preserves omitted draft settings while canonicalizing image media', async () => {
     const body = postBody({ settings: undefined });
 
@@ -412,6 +431,11 @@ describe('transactional post persistence', () => {
       'API'
     );
 
+    expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), {
+      maxWait: 5_000,
+      timeout: 30_000,
+    });
+
     expect(events).toEqual([
       'transaction:start',
       'media:locked',
@@ -420,6 +444,87 @@ describe('transactional post persistence', () => {
     ]);
     expect(result).toEqual([
       { postId: 'saved-post', integration: 'integration-1' },
+    ]);
+  });
+
+  it('does not upsert until the share-lock guard resolves on the same transaction client', async () => {
+    const events: string[] = [];
+    let releaseLock: (() => void) | undefined;
+    const lockGate = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    const tx = { marker: 'transaction-client' } as unknown as Prisma.TransactionClient;
+    const repository = {
+      createOrUpdatePost: jest.fn(
+        async (client: Prisma.TransactionClient) => {
+          expect(client).toBe(tx);
+          events.push('post:upsert');
+          return { posts: [{ id: 'saved-post', state: 'QUEUE' }] };
+        }
+      ),
+    };
+    const serviceState = Object.assign(
+      Object.create(PostsService.prototype) as object,
+      {
+        _postRepository: repository,
+        _integrationManager: {
+          getSocialIntegration: jest
+            .fn()
+            .mockReturnValue({ stripLinks: () => false }),
+        },
+        _shortLinkService: { convertTextToShortLinks: jest.fn() },
+        _prismaService: {
+          $transaction: jest.fn(
+            async (
+              callback: (client: Prisma.TransactionClient) => Promise<unknown>
+            ) => {
+              const result = await callback(tx);
+              events.push('transaction:complete');
+              return result;
+            }
+          ),
+        },
+        _mediaUsageService: {
+          lockAndCanonicalize: jest.fn(
+            async (client: Prisma.TransactionClient) => {
+              expect(client).toBe(tx);
+              events.push('lock:waiting');
+              await lockGate;
+              events.push('lock:acquired');
+              return postBody();
+            }
+          ),
+        },
+        startWorkflow: jest.fn().mockResolvedValue(undefined),
+      }
+    );
+    const service = serviceState as unknown as PostsService;
+
+    const pending = service.createPost(
+      orgId,
+      {
+        type: 'schedule',
+        date: '2026-09-04T10:00:00.000Z',
+        shortLink: false,
+        tags: [],
+        posts: [postBody()],
+      },
+      'API'
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(events).toEqual(['lock:waiting']);
+    expect(repository.createOrUpdatePost).not.toHaveBeenCalled();
+
+    releaseLock?.();
+    await pending;
+
+    expect(events).toEqual([
+      'lock:waiting',
+      'lock:acquired',
+      'post:upsert',
+      'transaction:complete',
     ]);
   });
 

@@ -12,6 +12,7 @@ import {
   ValidUrlExtension,
   ValidUrlPath,
 } from '@gitroom/helpers/utils/valid.url.path';
+import { MediaService } from '@gitroom/nestjs-libraries/database/prisma/media/media.service';
 
 const validUrlExtension = new ValidUrlExtension();
 const validUrlPath = new ValidUrlPath();
@@ -31,7 +32,8 @@ const attachmentUrl = z
 export class IntegrationSchedulePostTool implements AgentToolInterface {
   constructor(
     private _postsService: PostsService,
-    private _integrationService: IntegrationService
+    private _integrationService: IntegrationService,
+    private _mediaService: MediaService
   ) {}
   name = 'integrationSchedulePostTool';
 
@@ -207,6 +209,23 @@ If the tools return errors, you would need to rerun it with the right parameters
             throw new Error('Integration not found');
           }
 
+          const values = await Promise.all(
+            post.postsAndComments.map(async (item) => ({
+              content: item.content,
+              id: makeId(10),
+              delay: 0,
+              image: await Promise.all(
+                item.attachments.map((path) =>
+                  this._mediaService.saveFile(
+                    organizationId,
+                    makeId(10),
+                    path
+                  )
+                )
+              ),
+            }))
+          );
+
           const output = await this._postsService.createPost(organizationId, {
             date: post.date,
             type: post.type as 'draft' | 'schedule' | 'now',
@@ -225,15 +244,7 @@ If the tools return errors, you would need to rerun it with the right parameters
                     __type: integration.providerIdentifier,
                   } as AllProvidersSettings
                 ),
-                value: post.postsAndComments.map((p: any) => ({
-                  content: p.content,
-                  id: makeId(10),
-                  delay: 0,
-                  image: p.attachments.map((p: any) => ({
-                    id: makeId(10),
-                    path: p,
-                  })),
-                })),
+                value: values,
               },
             ],
           }, 'MCP');
