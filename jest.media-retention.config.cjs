@@ -7,6 +7,7 @@ module.exports = {
   testMatch: [
     '<rootDir>/libraries/nestjs-libraries/src/database/prisma/media/media.retention.spec.ts',
     '<rootDir>/libraries/nestjs-libraries/src/database/prisma/media/media.usage.service.spec.ts',
+    '<rootDir>/libraries/nestjs-libraries/src/database/prisma/media/media.repository.spec.ts',
     '<rootDir>/libraries/nestjs-libraries/src/chat/tools/integration.schedule.post.spec.ts',
     '<rootDir>/libraries/nestjs-libraries/src/database/prisma/autopost/autopost.service.spec.ts',
     '<rootDir>/apps/media-retention/src/cli.spec.ts',

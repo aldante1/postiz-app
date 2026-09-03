@@ -40,6 +40,8 @@ class FixtureDatabase {
   holderReads = 0;
   holderMutationRead = 2;
   afterFirstHolderRead?: () => void;
+  transactionCount = 0;
+  failTransactionAt?: number;
 
   private selected(rows: Row[], args: Row = {}) {
     const where = args.where ?? {};
@@ -96,7 +98,24 @@ class FixtureDatabase {
   };
   $transaction = async (
     callback: (database: FixtureDatabase) => Promise<unknown>
-  ) => callback(this);
+  ) => {
+    this.transactionCount += 1;
+    const mediaRows = structuredClone(this.mediaRows);
+    const postRows = structuredClone(this.postRows);
+    const updatesLength = this.updates.length;
+    try {
+      const result = await callback(this);
+      if (this.transactionCount === this.failTransactionAt) {
+        throw new Error(`injected transaction ${this.transactionCount} failure`);
+      }
+      return result;
+    } catch (error: unknown) {
+      this.mediaRows = mediaRows;
+      this.postRows = postRows;
+      this.updates.length = updatesLength;
+      throw error;
+    }
+  };
 
   constructor() {
     this.media.findFirst = async (args: Row) => this.selected(this.mediaRows, args)[0] ?? null;
@@ -409,7 +428,27 @@ describe('RetentionRunner', () => {
 
     const result = await makeRunner().run({ mode: 'dry-run', orphanMode: 'off', olderThanDays: 30 });
 
-    expect(result).toEqual({ candidates: 1, skipped: 0, staged: 0, purged: 0, bytesFreed: 0, errors: [] });
+    expect(result).toEqual({
+      candidates: 1,
+      skipped: 0,
+      staged: 0,
+      purged: 0,
+      bytesFreed: 0,
+      projectedBytesFreed: 6,
+      errors: [],
+      candidateEvidence: [{
+        mediaId: 'm1',
+        originalBytes: 6,
+        projectedBytesFreed: 6,
+        preview: {
+          publicUrl: `${FRONTEND_URL}/uploads/.retention/m1.webp`,
+          filePath: join(uploads, '.retention', 'm1.webp'),
+          kind: 'webp',
+        },
+        decision: 'would-regenerate-and-purge',
+        errors: [],
+      }],
+    });
     expect(readFileSync(source, 'utf8')).toBe(before);
     expect(readdirSync(join(uploads, '.retention'))).toEqual([]);
     expect(db.updates).toEqual([]);
@@ -504,7 +543,7 @@ describe('RetentionRunner', () => {
 
     const result = await makeRunner().run({ mode: 'apply', orphanMode: 'off', olderThanDays: 30 });
 
-    expect(result).toEqual({ candidates: 1, skipped: 0, staged: 1, purged: 1, bytesFreed: 6, errors: [] });
+    expect(result).toEqual(expect.objectContaining({ candidates: 1, skipped: 0, staged: 1, purged: 1, bytesFreed: 6, errors: [] }));
     expect(existsSync(source)).toBe(false);
     expect(db.mediaRows[0]).toEqual(expect.objectContaining({
       retentionState: 'PURGED',
@@ -616,7 +655,7 @@ describe('RetentionRunner', () => {
   it('skips an external URL without touching it', async () => {
     db.mediaRows = [media({ path: 'https://cdn.example/m1.png' })];
     const result = await makeRunner().run({ mode: 'apply', orphanMode: 'off', olderThanDays: 30 });
-    expect(result).toEqual({ candidates: 1, skipped: 1, staged: 0, purged: 0, bytesFreed: 0, errors: [] });
+    expect(result).toEqual(expect.objectContaining({ candidates: 1, skipped: 1, staged: 0, purged: 0, bytesFreed: 0, errors: [] }));
     expect(db.updates).toEqual([]);
   });
 
@@ -715,21 +754,44 @@ describe('RetentionRunner', () => {
     expect(existsSync(join(uploads, 'm1.png'))).toBe(true);
   });
 
-  it('revalidates holders after staging and leaves a newly referenced original intact', async () => {
+  it.each([
+    ['Set', () => {
+      db.setRows.push({ id: 'late-set', content: JSON.stringify({ id: 'm1' }) });
+    }],
+    ['pending Post', () => {
+      db.postRows.push(publishedPost({
+        id: 'late-post',
+        state: 'DRAFT',
+      }));
+    }],
+    ['duplicate Media path', () => {
+      db.mediaRows.push(media({
+        id: 'm2',
+        path: `${FRONTEND_URL}/uploads/m1.png`,
+        createdAt: NOW,
+      }));
+    }],
+    ['malformed holder', () => {
+      db.setRows.push({ id: 'late-broken', content: '{"id":"m1"' });
+    }],
+  ])('restores ACTIVE when a %s appears after staging', async (_name, mutate) => {
     db.mediaRows = [media()];
     db.postRows = [publishedPost()];
-    db.afterFirstHolderRead = () => {
-      db.setRows.push({ id: 'late-set', content: JSON.stringify({ id: 'm1' }) });
-    };
+    db.afterFirstHolderRead = mutate;
     writeFileSync(join(uploads, 'm1.png'), 'source');
 
-    const result = await makeRunner().run({ mode: 'apply', orphanMode: 'off', olderThanDays: 30 });
+    const result = await makeRunner().run({
+      mode: 'apply',
+      orphanMode: 'off',
+      olderThanDays: 30,
+    });
 
     expect(result.staged).toBe(1);
     expect(result.purged).toBe(0);
     expect(result.skipped).toBe(1);
     expect(existsSync(join(uploads, 'm1.png'))).toBe(true);
-    expect(db.mediaRows[0].retentionState).toBe('STAGED');
+    expect(db.mediaRows[0].retentionState).toBe('ACTIVE');
+    expect(db.postRows[0].image).toContain('/uploads/.retention/m1.webp');
   });
   it('does not unlink an original replaced while the row is being staged', async () => {
     db.mediaRows = [media()];
@@ -751,6 +813,161 @@ describe('RetentionRunner', () => {
     expect(result.errors).toEqual([expect.stringContaining('changed before unlink')]);
     expect(readFileSync(source, 'utf8')).toBe('replacement');
     expect(db.mediaRows[0].retentionState).toBe('STAGED');
+  });
+
+  it('does not remove the original when the staging transaction fails to commit', async () => {
+    db.mediaRows = [media()];
+    db.postRows = [publishedPost()];
+    const source = join(uploads, 'm1.png');
+    writeFileSync(source, 'source');
+    db.failTransactionAt = 1;
+
+    await expect(makeRunner().run({
+      mode: 'apply',
+      orphanMode: 'off',
+      olderThanDays: 30,
+    })).rejects.toThrow('injected transaction 1 failure');
+
+    expect(existsSync(source)).toBe(true);
+    expect(db.mediaRows[0].retentionState).toBe('ACTIVE');
+    expect(db.postRows[0].image).toContain('/uploads/m1.png');
+  });
+
+  it('leaves committed STAGED recovery when PURGED finalization fails', async () => {
+    db.mediaRows = [media()];
+    db.postRows = [publishedPost()];
+    const source = join(uploads, 'm1.png');
+    writeFileSync(source, 'source');
+    db.failTransactionAt = 3;
+
+    await expect(makeRunner().run({
+      mode: 'apply',
+      orphanMode: 'off',
+      olderThanDays: 30,
+    })).rejects.toThrow('injected transaction 3 failure');
+
+    expect(existsSync(source)).toBe(false);
+    expect(db.mediaRows[0].retentionState).toBe('STAGED');
+    expect(db.postRows[0].image).toContain('/uploads/.retention/m1.webp');
+  });
+  it('records a missing stored preview and continues with later candidates', async () => {
+    const missingPreview = `${FRONTEND_URL}/uploads/.retention/m1.jpg`;
+    db.mediaRows = [
+      media({
+        retentionState: 'STAGED',
+        archivePreviewPath: missingPreview,
+      }),
+      media({
+        id: 'm2',
+        name: 'm2.png',
+        path: `${FRONTEND_URL}/uploads/m2.png`,
+      }),
+    ];
+    db.postRows = [publishedPost({
+      id: 'post-2',
+      image: JSON.stringify([{
+        id: 'm2',
+        path: `${FRONTEND_URL}/uploads/m2.png`,
+      }]),
+    })];
+    writeFileSync(join(uploads, 'm2.png'), 'source');
+
+    const result = await makeRunner().run({
+      mode: 'apply',
+      orphanMode: 'off',
+      olderThanDays: 30,
+    });
+
+    expect(result.candidates).toBe(2);
+    expect(result.purged).toBe(1);
+    expect(result.errors).toEqual([
+      'media m1: preview missing and original missing',
+    ]);
+    expect(db.mediaRows[1].retentionState).toBe('PURGED');
+  });
+
+
+  it('records an unsafe stored preview and continues with later candidates', async () => {
+    db.mediaRows = [
+      media({
+        retentionState: 'STAGED',
+        archivePreviewPath: 'https://cdn.example/m1.jpg',
+      }),
+      media({
+        id: 'm2',
+        name: 'm2.png',
+        path: `${FRONTEND_URL}/uploads/m2.png`,
+      }),
+    ];
+    db.postRows = [publishedPost({
+      id: 'post-2',
+      image: JSON.stringify([{
+        id: 'm2',
+        path: `${FRONTEND_URL}/uploads/m2.png`,
+      }]),
+    })];
+    writeFileSync(join(uploads, 'm2.png'), 'source');
+
+    const result = await makeRunner().run({
+      mode: 'apply',
+      orphanMode: 'off',
+      olderThanDays: 30,
+    });
+
+    expect(result.candidates).toBe(2);
+    expect(result.purged).toBe(1);
+    expect(result.errors).toEqual([
+      expect.stringContaining('media m1 has an unsafe stored preview'),
+    ]);
+    expect(db.mediaRows[1].retentionState).toBe('PURGED');
+  });
+
+  it('rejects a regenerated STAGED preview that differs from its stored URL', async () => {
+    const storedPreview = `${FRONTEND_URL}/uploads/.retention/m1.webp`;
+    db.mediaRows = [media({
+      name: 'm1.mp4',
+      path: `${FRONTEND_URL}/uploads/m1.mp4`,
+      retentionState: 'STAGED',
+      archivePreviewPath: storedPreview,
+    })];
+    db.postRows = [publishedPost({
+      image: JSON.stringify([{ id: 'm1', path: storedPreview }]),
+    })];
+    const source = join(uploads, 'm1.mp4');
+    writeFileSync(source, 'video');
+    const prepare = jest.fn(async () => {
+      const tempPath = join(uploads, '.retention', '.m1.prepared.jpg');
+      writeFileSync(tempPath, 'preview');
+      const stat = statSync(tempPath);
+      return {
+        tempPath,
+        result: {
+          publicUrl: `${FRONTEND_URL}/uploads/.retention/m1.jpg`,
+          filePath: join(uploads, '.retention', 'm1.jpg'),
+          kind: 'jpg',
+        },
+        identity: {
+          path: realpathSync(tempPath),
+          size: stat.size,
+          device: stat.dev,
+          inode: stat.ino,
+          mtimeMs: stat.mtimeMs,
+        },
+      };
+    });
+
+    const result = await makeRunner({ prepare }).run({
+      mode: 'apply',
+      orphanMode: 'off',
+      olderThanDays: 30,
+    });
+
+    expect(result.errors).toEqual([
+      expect.stringContaining('does not match stored preview'),
+    ]);
+    expect(db.mediaRows[0].retentionState).toBe('STAGED');
+    expect(existsSync(source)).toBe(true);
+    expect(existsSync(join(uploads, '.retention', 'm1.jpg'))).toBe(false);
   });
 
 });

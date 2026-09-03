@@ -1,3 +1,4 @@
+import { MediaRetentionState } from '@prisma/client';
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { Injectable } from '@nestjs/common';
 import { SaveMediaInformationDto } from '@gitroom/nestjs-libraries/dtos/media/save.media.information.dto';
@@ -33,6 +34,8 @@ export class MediaRepository {
     return this._media.model.media.findUnique({
       where: {
         id,
+        deletedAt: null,
+        retentionState: MediaRetentionState.ACTIVE,
       },
     });
   }
@@ -89,6 +92,7 @@ export class MediaRepository {
           id: org,
         },
         deletedAt: null,
+        retentionState: MediaRetentionState.ACTIVE,
         ...searchFilter,
       },
     };
@@ -97,6 +101,7 @@ export class MediaRepository {
       where: {
         organizationId: org,
         deletedAt: null,
+        retentionState: MediaRetentionState.ACTIVE,
         ...searchFilter,
       },
       orderBy: {

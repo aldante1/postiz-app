@@ -1,6 +1,6 @@
 services:
   postiz-maintenance:
-    image: ghcr.io/aldante1/postiz-app:max-v2.23.0-9
+    image: ghcr.io/aldante1/postiz-app:max-v2.23.0-10
     profiles: [maintenance]
     env_file: .env
     volumes:
