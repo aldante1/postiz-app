@@ -206,12 +206,6 @@ model Star {
   @@unique([login, date])
 }
 
-enum MediaRetentionState {
-  ACTIVE
-  STAGED
-  PURGED
-}
-
 model Media {
   id                 String              @id @default(uuid())
   name               String
@@ -226,9 +220,9 @@ model Media {
   thumbnail          String?
   alt                String?
   thumbnailTimestamp Int?
-  retentionState      MediaRetentionState @default(ACTIVE)
-  archivePreviewPath  String?
-  originalPurgedAt    DateTime?
+  retentionState     MediaRetentionState @default(ACTIVE)
+  archivePreviewPath String?
+  originalPurgedAt   DateTime?
   organization       Organization        @relation(fields: [organizationId], references: [id])
   agencies           SocialMediaAgency[]
   userPicture        User[]
@@ -896,6 +890,12 @@ model OAuthAuthorization {
   @@index([userId])
   @@index([organizationId])
   @@index([revokedAt])
+}
+
+enum MediaRetentionState {
+  ACTIVE
+  STAGED
+  PURGED
 }
 
 enum OrderStatus {

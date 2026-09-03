@@ -41,10 +41,7 @@ describe('Media retention schema', () => {
 
   it('indexes retention state with creation time', () => {
     const schema = readFileSync(
-      resolve(
-        process.cwd(),
-        'libraries/nestjs-libraries/src/database/prisma/schema.prisma'
-      ),
+      resolve(__dirname, '../schema.prisma'),
       'utf8'
     );
     const mediaSchema = schema.match(/model Media \{[\s\S]*?\n\}/)?.[0];
