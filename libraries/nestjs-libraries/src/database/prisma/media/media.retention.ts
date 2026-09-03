@@ -21,7 +21,7 @@ function isInside(root: string, candidate: string): boolean {
   );
 }
 
-function normalizedReference(value: string): string {
+export function normalizeMediaReference(value: string): string {
   try {
     const url = new URL(value);
     if (url.protocol !== 'http:' && url.protocol !== 'https:') {
@@ -82,6 +82,12 @@ function replaceMatchingObjects(
   }
 }
 
+function referencesFromParsedJson(parsed: JsonValue): Set<string> {
+  const references = new Set<string>();
+  visitStrings(parsed, (value) => references.add(normalizeMediaReference(value)));
+  return references;
+}
+
 export function toLocalUploadPath(
   publicUrl: string,
   frontendUrl: string,
@@ -125,17 +131,33 @@ export function toLocalUploadPath(
   }
 }
 
-export function collectMediaReferences(json: string): Set<string> {
-  let parsed: JsonValue;
+export function parseMediaReferences(json: string): {
+  references: Set<string>;
+  valid: boolean;
+} {
   try {
-    parsed = JSON.parse(json) as JsonValue;
+    return {
+      references: referencesFromParsedJson(JSON.parse(json) as JsonValue),
+      valid: true,
+    };
   } catch {
+    return { references: new Set<string>(), valid: false };
+  }
+}
+
+export function collectMediaReferences(json: string): Set<string> {
+  return parseMediaReferences(json).references;
+}
+
+export function collectScalarMediaReferences(
+  value: string | null | undefined
+): Set<string> {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed.startsWith('{') || trimmed.startsWith('[')) {
     return new Set<string>();
   }
 
-  const references = new Set<string>();
-  visitStrings(parsed, (value) => references.add(normalizedReference(value)));
-  return references;
+  return new Set([normalizeMediaReference(trimmed)]);
 }
 
 export function replaceMediaReference(

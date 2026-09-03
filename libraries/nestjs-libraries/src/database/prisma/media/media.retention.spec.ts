@@ -11,6 +11,9 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
   collectMediaReferences,
+  collectScalarMediaReferences,
+  normalizeMediaReference,
+  parseMediaReferences,
   recoveryAction,
   replaceMediaReference,
   toLocalUploadPath,
@@ -214,6 +217,60 @@ describe('Media retention helpers', () => {
       expect(collectMediaReferences(JSON.stringify(value))).toContain(expected);
     });
 
+    it.each([
+      [
+        'Integration.picture',
+        'HTTPS://POSTIZ.42FACTORY.RU:443/uploads/integration.png?size=2#crop',
+        'https://postiz.42factory.ru/uploads/integration.png',
+      ],
+      ['User.pictureId', 'user-picture-id', 'user-picture-id'],
+      ['OAuthApp.pictureId', 'oauth-picture-id', 'oauth-picture-id'],
+      ['SocialMediaAgency.logoId', 'agency-logo-id', 'agency-logo-id'],
+      [
+        'Media.thumbnail',
+        'https://postiz.42factory.ru/uploads/thumbnail.png',
+        'https://postiz.42factory.ru/uploads/thumbnail.png',
+      ],
+      [
+        'Media.archivePreviewPath',
+        'https://postiz.42factory.ru/uploads/.retention/archive.webp',
+        'https://postiz.42factory.ru/uploads/.retention/archive.webp',
+      ],
+    ])('collects raw %s scalar columns', (_, value, expected) => {
+      expect(collectScalarMediaReferences(value)).toEqual(new Set([expected]));
+    });
+
+    it('does not reinterpret malformed object or array JSON as a scalar ID', () => {
+      expect(collectScalarMediaReferences('  {\"id\":')).toEqual(new Set());
+      expect(collectScalarMediaReferences(' [\"m1\"')).toEqual(new Set());
+    });
+
+    it('distinguishes valid empty JSON from malformed JSON', () => {
+      expect(parseMediaReferences('{}')).toEqual({
+        references: new Set(),
+        valid: true,
+      });
+      expect(parseMediaReferences('{\"id\":')).toEqual({
+        references: new Set(),
+        valid: false,
+      });
+    });
+
+    it.each([
+      [
+        '[\"HTTPS://POSTIZ.42FACTORY.RU:443/uploads/a.png?stored=1#stored\"]',
+        'https://postiz.42factory.ru/uploads/a.png?probe=1#probe',
+      ],
+      [
+        '[\"https://postiz.42factory.ru/uploads/a.png\"]',
+        'HTTPS://POSTIZ.42FACTORY.RU:443/uploads/a.png?probe=1#probe',
+      ],
+    ])('normalizes both collected and probed URL references', (json, probe) => {
+      expect(
+        collectMediaReferences(json).has(normalizeMediaReference(probe))
+      ).toBe(true);
+    });
+
     it('returns an empty set for malformed JSON used by blocking queries', () => {
       expect(collectMediaReferences('{"id":')).toEqual(new Set());
     });
@@ -228,6 +285,17 @@ describe('Media retention helpers', () => {
 
       expect(replaceMediaReference(json, 'm1', previewUrl)).toBe(
         '[{"id":"m1","path":"https://postiz.42factory.ru/uploads/.retention/m1.webp","url":"https://postiz.42factory.ru/uploads/.retention/m1.webp"},{"id":"m2","path":"keep"},{"nested":{"id":"m1","path":"https://postiz.42factory.ru/uploads/.retention/m1.webp","url":"https://postiz.42factory.ru/uploads/.retention/m1.webp"}},{"mediaId":"m1","path":"not-an-id"}]'
+      );
+    });
+
+    it('adds both persisted URL fields when a matching entry has only path', () => {
+      const previewUrl =
+        'https://postiz.42factory.ru/uploads/.retention/m1.webp';
+
+      expect(
+        replaceMediaReference('[{\"id\":\"m1\",\"path\":\"old\"}]', 'm1', previewUrl)
+      ).toBe(
+        '[{\"id\":\"m1\",\"path\":\"https://postiz.42factory.ru/uploads/.retention/m1.webp\",\"url\":\"https://postiz.42factory.ru/uploads/.retention/m1.webp\"}]'
       );
     });
 
