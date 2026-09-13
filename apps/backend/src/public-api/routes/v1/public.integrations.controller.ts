@@ -24,6 +24,7 @@ import { CheckPolicies } from '@gitroom/backend/services/auth/permissions/permis
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { UploadFactory } from '@gitroom/nestjs-libraries/upload/upload.factory';
+import { normalizeVideoIfNeeded } from '@gitroom/nestjs-libraries/upload/video.normalize';
 import { MediaService } from '@gitroom/nestjs-libraries/database/prisma/media/media.service';
 import { GetPostsDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts.dto';
 import { ChangePostStatusDto } from '@gitroom/nestjs-libraries/dtos/posts/change.post.status.dto';
@@ -87,6 +88,14 @@ export class PublicIntegrationsController {
     Sentry.metrics.count('public_api-request', 1);
     if (!file) {
       throw new HttpException({ msg: 'No file provided' }, 400);
+    }
+
+    if (file.mimetype.startsWith('video/')) {
+      const buffer = await normalizeVideoIfNeeded(
+        file.buffer,
+        file.originalname || 'upload.mp4'
+      );
+      file = { ...file, buffer, size: buffer.length };
     }
 
     const getFile = await this.storage.uploadFile(file);
