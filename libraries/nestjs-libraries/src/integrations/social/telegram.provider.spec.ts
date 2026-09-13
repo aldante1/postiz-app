@@ -2,9 +2,15 @@
 
 import type { PostDetails } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import type { Integration } from '@prisma/client';
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const mockToken = '123456:synthetic_telegram_bot_token_for_tests';
 const mockProxy = 'socks5://proxy-user:proxy-pass@127.0.0.1:19090';
+const frontendUrl = 'https://postiz.example.test';
+let uploadDirectory: string;
+const mockExecFile = jest.fn();
 
 type TelegramBotConstructorOptions = {
   request?: {
@@ -25,6 +31,10 @@ type TelegramSendMessageOptions = {
 
 type TelegramCaptionOptions = TelegramSendMessageOptions & {
   caption?: string;
+  width?: number;
+  height?: number;
+  duration?: number;
+  supports_streaming?: true;
 };
 
 type TelegramFileOptions = {
@@ -37,6 +47,10 @@ type TelegramMediaGroupItem = {
   media: string;
   caption?: string;
   parse_mode?: 'HTML';
+  width?: number;
+  height?: number;
+  duration?: number;
+  supports_streaming?: true;
 };
 
 type TelegramMediaGroupOptions = {
@@ -104,12 +118,24 @@ function mockRunBotHandler<TResult>(
   return handler(args) as TResult;
 }
 
+jest.mock('node:child_process', () => {
+  const execFile = (...args: unknown[]) => mockExecFile(...args);
+  Object.defineProperty(
+    execFile,
+    Symbol.for('nodejs.util.promisify.custom'),
+    {
+      value: (...args: unknown[]) => mockExecFile(...args),
+    }
+  );
+  return { execFile };
+});
 jest.mock('node-telegram-bot-api', () => {
   class MockTelegramBot {
     sendMessage: MockTelegramBotInstance['sendMessage'] = jest.fn(
       async (...args) =>
         mockRunBotHandler<Promise<TelegramMessageResponse>>('sendMessage', args)
     );
+
 
     sendPhoto: MockTelegramBotInstance['sendPhoto'] = jest.fn(
       async (...args) =>
@@ -223,6 +249,41 @@ function latestBot() {
   return bot;
 }
 
+function video(path: string) {
+  return {
+    type: 'video' as const,
+    path,
+  };
+}
+
+function mockVideoProbe({
+  width,
+  height,
+  duration,
+  sampleAspectRatio = '1:1',
+}: {
+  width: number;
+  height: number;
+  duration: number;
+  sampleAspectRatio?: string;
+}) {
+  mockExecFile.mockResolvedValueOnce({
+    stdout: JSON.stringify({
+      streams: [
+        {
+          codec_type: 'video',
+          width,
+          height,
+          duration: String(duration),
+          sample_aspect_ratio: sampleAspectRatio,
+        },
+      ],
+      format: { duration: String(duration) },
+    }),
+    stderr: '',
+  });
+}
+
 function resetMockTelegramBot() {
   mockTelegramBotState.constructorArgs = [];
   mockTelegramBotState.handlers = {};
@@ -248,9 +309,27 @@ function expectErrorNotToLeakSecrets(error: unknown) {
   expect(message).not.toContain(mockProxy);
 }
 
+beforeAll(async () => {
+  uploadDirectory = await realpath(
+    await mkdtemp(join(tmpdir(), 'postiz-telegram-video-'))
+  );
+  await Promise.all([
+    writeFile(join(uploadDirectory, 'one.mp4'), ''),
+    writeFile(join(uploadDirectory, 'two.mp4'), ''),
+  ]);
+});
+
+afterAll(async () => {
+  await rm(uploadDirectory, { recursive: true, force: true });
+});
+
 beforeEach(() => {
   process.env.TELEGRAM_TOKEN = mockToken;
+  process.env.STORAGE_PROVIDER = 'local';
+  process.env.FRONTEND_URL = frontendUrl;
+  process.env.UPLOAD_DIRECTORY = uploadDirectory;
   delete process.env.TELEGRAM_PROXY;
+  mockExecFile.mockReset();
   resetTelegramBot();
   resetMockTelegramBot();
 });
@@ -259,6 +338,9 @@ afterEach(() => {
   resetTelegramBot();
   delete process.env.TELEGRAM_PROXY;
   delete process.env.TELEGRAM_TOKEN;
+  delete process.env.STORAGE_PROVIDER;
+  delete process.env.FRONTEND_URL;
+  delete process.env.UPLOAD_DIRECTORY;
 });
 
 describe('TelegramProvider formatting contracts', () => {
@@ -269,6 +351,7 @@ describe('TelegramProvider formatting contracts', () => {
     expect(provider.maxLength(undefined, false)).toBe(4096);
     expect(provider.maxLength(undefined, true)).toBe(1024);
   });
+
 
   it('sends a text post as canonical Telegram HTML', async () => {
     allowBotMethod('sendMessage', () => Promise.resolve({ message_id: 1001 }));
@@ -326,6 +409,138 @@ describe('TelegramProvider formatting contracts', () => {
         },
       ],
       {}
+    );
+  });
+
+  it('sends local video geometry and streaming support to sendVideo', async () => {
+    mockVideoProbe({ width: 1920, height: 1080, duration: 12 });
+    allowBotMethod('sendVideo', () => Promise.resolve({ message_id: 1008 }));
+
+    await createProvider().post('channel', chatId, [
+      postDetails(formattedEditorHtml, [
+        video(`${frontendUrl}/uploads/one.mp4`),
+      ]),
+    ]);
+
+    expect(latestBot().sendVideo).toHaveBeenCalledWith(
+      chatId,
+      '/uploads/one.mp4',
+      {
+        caption: canonicalTelegramHtml,
+        parse_mode: 'HTML',
+        width: 1920,
+        height: 1080,
+        duration: 12,
+        supports_streaming: true,
+      },
+      { filename: 'one.mp4', contentType: 'video/mp4' }
+    );
+    expect(mockExecFile).toHaveBeenCalledWith(
+      'ffprobe',
+      expect.arrayContaining([join(uploadDirectory, 'one.mp4')]),
+      expect.objectContaining({ timeout: 60_000 })
+    );
+  });
+
+  it('adds geometry only to video items in media groups', async () => {
+    mockVideoProbe({ width: 1280, height: 720, duration: 8 });
+    allowBotMethod('sendMediaGroup', () =>
+      Promise.resolve([{ message_id: 1009 }, { message_id: 1010 }])
+    );
+
+    await createProvider().post('channel', chatId, [
+      postDetails(formattedEditorHtml, [
+        image('https://cdn.example.test/one.jpg'),
+        video(`${frontendUrl}/uploads/two.mp4`),
+      ]),
+    ]);
+
+    expect(latestBot().sendMediaGroup).toHaveBeenCalledWith(
+      chatId,
+      [
+        {
+          type: 'photo',
+          media: 'https://cdn.example.test/one.jpg',
+          caption: canonicalTelegramHtml,
+          parse_mode: 'HTML',
+        },
+        {
+          type: 'video',
+          media: '/uploads/two.mp4',
+          caption: undefined,
+          parse_mode: 'HTML',
+          width: 1280,
+          height: 720,
+          duration: 8,
+          supports_streaming: true,
+        },
+      ],
+      {}
+    );
+  });
+
+  it('still sends a local video without geometry when ffprobe fails', async () => {
+    mockExecFile.mockRejectedValueOnce(new Error('ffprobe failed'));
+    allowBotMethod('sendVideo', () => Promise.resolve({ message_id: 1011 }));
+
+    await createProvider().post('channel', chatId, [
+      postDetails(formattedEditorHtml, [
+        video(`${frontendUrl}/uploads/one.mp4`),
+      ]),
+    ]);
+
+    expect(latestBot().sendVideo).toHaveBeenCalledWith(
+      chatId,
+      '/uploads/one.mp4',
+      { caption: canonicalTelegramHtml, parse_mode: 'HTML' },
+      { filename: 'one.mp4', contentType: 'video/mp4' }
+    );
+  });
+
+  it('still sends a non-local video without probing or geometry', async () => {
+    process.env.STORAGE_PROVIDER = 'cloudflare';
+    allowBotMethod('sendVideo', () => Promise.resolve({ message_id: 1012 }));
+
+    await createProvider().post('channel', chatId, [
+      postDetails(formattedEditorHtml, [
+        video('https://cdn.example.test/remote.mp4'),
+      ]),
+    ]);
+
+    expect(latestBot().sendVideo).toHaveBeenCalledWith(
+      chatId,
+      'https://cdn.example.test/remote.mp4',
+      { caption: canonicalTelegramHtml, parse_mode: 'HTML' },
+      { filename: 'remote.mp4', contentType: 'video/mp4' }
+    );
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it('uses display width derived from the video sample aspect ratio', async () => {
+    mockVideoProbe({
+      width: 720,
+      height: 576,
+      duration: 15,
+      sampleAspectRatio: '40:33',
+    });
+    allowBotMethod('sendVideo', () => Promise.resolve({ message_id: 1013 }));
+
+    await createProvider().post('channel', chatId, [
+      postDetails(formattedEditorHtml, [
+        video(`${frontendUrl}/uploads/one.mp4`),
+      ]),
+    ]);
+
+    expect(latestBot().sendVideo).toHaveBeenCalledWith(
+      chatId,
+      '/uploads/one.mp4',
+      expect.objectContaining({
+        width: 873,
+        height: 576,
+        duration: 15,
+        supports_streaming: true,
+      }),
+      { filename: 'one.mp4', contentType: 'video/mp4' }
     );
   });
 

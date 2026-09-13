@@ -43,6 +43,7 @@ const compatibleProbe = {
       width: 1920,
       height: 1080,
       pix_fmt: 'yuv420p',
+      sample_aspect_ratio: '1:1',
       r_frame_rate: '30000/1001',
       avg_frame_rate: '30000/1001',
       duration: '12.012000',
@@ -82,6 +83,29 @@ describe('Postiz upload video compatibility', () => {
     expect(videoComplianceIssues(info!)).toEqual([]);
   });
 
+  it('reports anamorphic pixels and rotation metadata as geometry issues', () => {
+    const info = parseVideoProbe({
+      ...compatibleProbe,
+      streams: [
+        {
+          ...compatibleProbe.streams[0],
+          sample_aspect_ratio: '40:33',
+          tags: { rotate: '0' },
+          side_data_list: [{ rotation: 90 }],
+        },
+        compatibleProbe.streams[1],
+      ],
+    });
+
+    expect(info).not.toBeNull();
+    expect(videoComplianceIssues(info!)).toEqual(
+      expect.arrayContaining([
+        'sample_aspect_ratio "40:33" must be 1:1',
+        'rotation 90 must be baked into the frame',
+      ])
+    );
+  });
+
   it('does not add audio encoding arguments when the input has no audio', () => {
     const info = parseVideoProbe({
       ...compatibleProbe,
@@ -96,7 +120,7 @@ describe('Postiz upload video compatibility', () => {
       '-i',
       'input.mp4',
       '-vf',
-      'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+      'scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1',
       '-c:v',
       'libx264',
       '-profile:v',
@@ -107,6 +131,8 @@ describe('Postiz upload video compatibility', () => {
       '18',
       '-preset',
       'medium',
+      '-metadata:s:v:0',
+      'rotate=0',
       '-movflags',
       '+faststart',
       'output.mp4',
@@ -124,7 +150,7 @@ describe('Postiz upload video compatibility', () => {
     expect(normalizeFfmpegArgs('input.mp4', 'output.mp4', info!)).toEqual(
       expect.arrayContaining([
         '-vf',
-        'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+        'scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1',
       ])
     );
   });

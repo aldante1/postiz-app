@@ -22,6 +22,10 @@ import {
   toTelegramHtml,
   type TelegramHtml,
 } from '@gitroom/nestjs-libraries/integrations/social/telegram.html';
+import {
+  getTelegramVideoGeometry,
+  type TelegramVideoGeometry,
+} from '@gitroom/nestjs-libraries/integrations/social/telegram.video';
 
 let cachedBot: TelegramBot | undefined;
 
@@ -59,6 +63,7 @@ type ProcessedTelegramMedia = {
     filename?: string;
     contentType: string;
   };
+  videoGeometry?: TelegramVideoGeometry;
 };
 
 type TelegramMediaGroupItem = {
@@ -66,10 +71,11 @@ type TelegramMediaGroupItem = {
   media: string;
   caption?: string;
   parse_mode: 'HTML';
+  width?: number;
+  height?: number;
+  duration?: number;
+  supports_streaming?: true;
 };
-// Added to support local storage posting
-const frontendURL = process.env.FRONTEND_URL || 'http://localhost:5000';
-const mediaStorage = process.env.STORAGE_PROVIDER || 'local';
 
 export class TelegramProvider extends SocialAbstract implements SocialProvider {
   override maxConcurrentJob = 3; // Telegram has moderate bot API limits
@@ -195,34 +201,47 @@ export class TelegramProvider extends SocialAbstract implements SocialProvider {
       : {};
   }
 
-  private processMedia(mediaFiles: PostDetails['media']): ProcessedTelegramMedia[] {
-    return (mediaFiles || []).map((media) => {
-      let mediaUrl = media.path;
-      if (mediaStorage === 'local' && mediaUrl.startsWith(frontendURL)) {
-        mediaUrl = mediaUrl.replace(frontendURL, '');
-      }
-      //get mime type to pass contentType to telegram api.
-      //some photos and videos might not pass telegram api restrictions, so they are sent as documents instead of returning errors
-      const mimeType = mime.getType(mediaUrl); // Detect MIME type
-      let mediaType: 'photo' | 'video' | 'document';
+  private async processMedia(
+    mediaFiles: PostDetails['media']
+  ): Promise<ProcessedTelegramMedia[]> {
+    const frontendURL = process.env.FRONTEND_URL || 'http://localhost:5000';
+    const mediaStorage = process.env.STORAGE_PROVIDER || 'local';
 
-      if (mimeType?.startsWith('image/')) {
-        mediaType = 'photo';
-      } else if (mimeType?.startsWith('video/')) {
-        mediaType = 'video';
-      } else {
-        mediaType = 'document';
-      }
+    return Promise.all(
+      (mediaFiles || []).map(async (media) => {
+        let mediaUrl = media.path;
+        if (mediaStorage === 'local' && mediaUrl.startsWith(frontendURL)) {
+          mediaUrl = mediaUrl.replace(frontendURL, '');
+        }
+        //get mime type to pass contentType to telegram api.
+        //some photos and videos might not pass telegram api restrictions, so they are sent as documents instead of returning errors
+        const mimeType = mime.getType(mediaUrl); // Detect MIME type
+        let mediaType: 'photo' | 'video' | 'document';
 
-      return {
-        type: mediaType,
-        media: mediaUrl,
-        fileOptions: {
-          filename: media.path.split('/').pop(),
-          contentType: mimeType || 'application/octet-stream',
-        },
-      };
-    });
+        if (mimeType?.startsWith('image/')) {
+          mediaType = 'photo';
+        } else if (mimeType?.startsWith('video/')) {
+          mediaType = 'video';
+        } else {
+          mediaType = 'document';
+        }
+
+        const videoGeometry =
+          mediaType === 'video'
+            ? await getTelegramVideoGeometry(media.path)
+            : null;
+
+        return {
+          type: mediaType,
+          media: mediaUrl,
+          fileOptions: {
+            filename: media.path.split('/').pop(),
+            contentType: mimeType || 'application/octet-stream',
+          },
+          ...(videoGeometry ? { videoGeometry } : {}),
+        };
+      })
+    );
   }
 
   private async sendMessage(
@@ -232,7 +251,7 @@ export class TelegramProvider extends SocialAbstract implements SocialProvider {
   ): Promise<number | null> {
     let messageId: number | null = null;
     const mediaFiles = message.media || [];
-    const processedMedia = this.processMedia(mediaFiles);
+    const processedMedia = await this.processMedia(mediaFiles);
     const { html, length } = this.formatMessage(message.message || '');
     const limit = telegramLimit(processedMedia.length > 0);
     if (length > limit) {
@@ -261,6 +280,7 @@ export class TelegramProvider extends SocialAbstract implements SocialProvider {
         caption: html,
         parse_mode: 'HTML' as const,
         ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {}),
+        ...(media.type === 'video' ? media.videoGeometry : {}),
       };
       const response =
         media.type === 'video'
@@ -295,6 +315,7 @@ export class TelegramProvider extends SocialAbstract implements SocialProvider {
             media: m.media,
             caption: i === 0 && index === 0 ? html : undefined,
             parse_mode: 'HTML',
+            ...(m.type === 'video' ? m.videoGeometry : {}),
           })
         );
 

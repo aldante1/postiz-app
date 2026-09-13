@@ -34,6 +34,8 @@ export interface VideoInfo {
   audioStreams: VideoAudioInfo[];
   formatName: string | null;
   duration: number | null;
+  sampleAspectRatio: string | null;
+  rotation: number | null;
   fastStart?: boolean;
 }
 
@@ -115,6 +117,24 @@ export function parseVideoProbe(ffprobeJson: unknown): VideoInfo | null {
 
   const formatDuration = numberValue(format.duration);
   const streamDuration = numberValue(video.duration);
+  const tags =
+    typeof video.tags === 'object' &&
+    video.tags !== null &&
+    !Array.isArray(video.tags)
+      ? (video.tags as ProbeRecord)
+      : {};
+  const sideData = Array.isArray(video.side_data_list)
+    ? video.side_data_list.filter(
+        (item): item is ProbeRecord =>
+          typeof item === 'object' && item !== null && !Array.isArray(item)
+      )
+    : [];
+  const rotations = [
+    numberValue(tags.rotate),
+    ...sideData.map((item) => numberValue(item.rotation)),
+  ].filter((rotation): rotation is number => rotation !== null);
+  const rotation =
+    rotations.find((candidate) => candidate !== 0) ?? rotations[0] ?? null;
 
   return {
     codecName: stringValue(video.codec_name),
@@ -127,6 +147,8 @@ export function parseVideoProbe(ffprobeJson: unknown): VideoInfo | null {
     audioStreams,
     formatName: stringValue(format.format_name),
     duration: formatDuration ?? streamDuration,
+    sampleAspectRatio: stringValue(video.sample_aspect_ratio),
+    rotation,
     fastStart:
       typeof probe.fast_start === 'boolean'
         ? probe.fast_start
@@ -155,6 +177,18 @@ export function videoComplianceIssues(info: VideoInfo): string[] {
     issues.push(
       `pix_fmt "${info.pixelFormat ?? 'missing'}" must be yuv420p`
     );
+  }
+  if (
+    info.sampleAspectRatio !== null &&
+    info.sampleAspectRatio !== 'N/A' &&
+    info.sampleAspectRatio !== '1:1'
+  ) {
+    issues.push(
+      `sample_aspect_ratio "${info.sampleAspectRatio}" must be 1:1`
+    );
+  }
+  if (info.rotation !== null && info.rotation !== 0) {
+    issues.push(`rotation ${info.rotation} must be baked into the frame`);
   }
 
   if (!Number.isInteger(info.width) || (info.width ?? 0) <= 0) {
@@ -211,7 +245,7 @@ export function normalizeFfmpegArgs(
     '-i',
     input,
     '-vf',
-    'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+    'scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1',
     '-c:v',
     'libx264',
     '-profile:v',
@@ -228,7 +262,13 @@ export function normalizeFfmpegArgs(
     args.push('-c:a', 'aac', '-b:a', '128k', '-ac', '2', '-ar', '48000');
   }
 
-  args.push('-movflags', '+faststart', output);
+  args.push(
+    '-metadata:s:v:0',
+    'rotate=0',
+    '-movflags',
+    '+faststart',
+    output
+  );
   return args;
 }
 
@@ -290,7 +330,9 @@ function repairCommand(info: VideoInfo): string {
   const args = normalizeFfmpegArgs('IN', 'OUT', info);
   return `ffmpeg ${args
     .map((arg) =>
-      arg === 'scale=trunc(iw/2)*2:trunc(ih/2)*2' ? `"${arg}"` : arg
+      arg === 'scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1'
+        ? `"${arg}"`
+        : arg
     )
     .join(' ')}`;
 }
@@ -334,7 +376,7 @@ export async function normalizeVideoIfNeeded(
       rawProbe = JSON.parse(stdout);
     } catch {
       throw new BadRequestException(
-        `Video metadata could not be read for "${originalName}". Fix it with: ffmpeg -y -i IN -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:v libx264 -profile:v high -pix_fmt yuv420p -crf 18 -preset medium -c:a aac -b:a 128k -ac 2 -ar 48000 -movflags +faststart OUT`
+        `Video metadata could not be read for "${originalName}". Fix it with: ffmpeg -y -i IN -vf "scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1" -c:v libx264 -profile:v high -pix_fmt yuv420p -crf 18 -preset medium -metadata:s:v:0 rotate=0 -c:a aac -b:a 128k -ac 2 -ar 48000 -movflags +faststart OUT`
       );
     }
 
