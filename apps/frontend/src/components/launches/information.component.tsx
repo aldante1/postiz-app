@@ -8,6 +8,10 @@ import SafeImage from '@gitroom/react/helpers/safe.image';
 import { capitalize } from 'lodash';
 import { useT } from '@gitroom/react/translation/get.transation.service.client';
 import { hasLinks } from '@gitroom/helpers/utils/strip.links';
+import {
+  CharLimits,
+  pickCharLimit,
+} from '@gitroom/frontend/components/new-launch/providers/max.characters';
 
 const Valid: FC = () => {
   return (
@@ -56,7 +60,7 @@ const Invalid: FC = () => {
   );
 };
 export const InformationComponent: FC<{
-  chars: Record<string, number>;
+  chars: Record<string, CharLimits | undefined>;
   totalChars: number;
   totalAllowedChars: number;
   isPicture: boolean;
@@ -90,6 +94,19 @@ export const InformationComponent: FC<{
   }, [text, isGlobal, currentIntegration, selectedIntegrations]);
 
   const showStripLinkWarning = stripLinkNames.length > 0;
+
+  // Лимит каждой площадки для ЭТОГО сообщения: с вложениями Telegram держит
+  // caption, без них — полный текст. Соседние сообщения треда не влияют.
+  const limitFor = useMemo(
+    () =>
+      Object.fromEntries(
+        Object.entries(chars ?? {}).map(([id, limits]) => [
+          id,
+          pickCharLimit(limits, isPicture),
+        ])
+      ) as Record<string, number>,
+    [chars, isPicture]
+  );
 
   const isInternal = useMemo(() => {
     if (!isGlobal) {
@@ -127,7 +144,7 @@ export const InformationComponent: FC<{
           return false;
         }
 
-        return totalChars > (chars?.[p.integration.id] || 0);
+        return totalChars > (limitFor[p.integration.id] || 0);
       })
     ) {
       return false;
@@ -139,7 +156,7 @@ export const InformationComponent: FC<{
     totalChars,
     isInternal,
     isPicture,
-    chars,
+    limitFor,
     showStripLinkWarning,
   ]);
 
@@ -151,7 +168,7 @@ export const InformationComponent: FC<{
     // Get all limits from non-internal integrations, sorted ascending
     const limits = selectedIntegrations
       .map((p, index) => ({
-        limit: chars?.[p.integration.id] || 0,
+        limit: limitFor[p.integration.id] || 0,
         isInternal: isInternal[index],
       }))
       .filter((item) => !item.isInternal && item.limit > 0)
@@ -166,7 +183,7 @@ export const InformationComponent: FC<{
     // If all are exceeded, show the smallest one
     const validLimit = limits.find((limit) => totalChars <= limit);
     return validLimit ?? limits[0];
-  }, [isGlobal, selectedIntegrations, chars, isInternal, totalChars]);
+  }, [isGlobal, selectedIntegrations, limitFor, isInternal, totalChars]);
 
   return (
     <div
@@ -237,7 +254,7 @@ export const InformationComponent: FC<{
                       'whitespace-nowrap',
                       isInternal?.[index]
                         ? ''
-                        : totalChars > (chars?.[p.integration.id] || 0)
+                        : totalChars > (limitFor[p.integration.id] || 0)
                         ? 'text-[#FF3F3F]'
                         : ''
                     )}
@@ -250,14 +267,14 @@ export const InformationComponent: FC<{
                       'whitespace-nowrap',
                       isInternal?.[index]
                         ? ''
-                        : totalChars > (chars?.[p.integration.id] || 0)
+                        : totalChars > (limitFor[p.integration.id] || 0)
                         ? 'text-[#FF3F3F]'
                         : ''
                     )}
                   >
                     {isInternal?.[index]
                       ? t('internal_edit', 'Internal Edit')
-                      : `${totalChars}/${chars?.[p.integration.id] || 0}`}
+                      : `${totalChars}/${limitFor[p.integration.id] || 0}`}
                   </div>
                 </Fragment>
               ))}

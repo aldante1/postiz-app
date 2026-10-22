@@ -7,7 +7,11 @@ import {
   telegramLimit,
 } from '@gitroom/helpers/utils/telegram.limits';
 import { MAX_TEXT_LIMIT } from '@gitroom/helpers/utils/max.limits';
-import { resolveMaxCharacters } from './max.characters';
+import {
+  pickCharLimit,
+  resolveCharLimits,
+  resolveMaxCharacters,
+} from './max.characters';
 
 describe('resolveMaxCharacters', () => {
   it('keeps a numeric limit independent of media', () => {
@@ -43,6 +47,30 @@ describe('resolveMaxCharacters', () => {
 
     expect(resolveMaxCharacters(limit, settings, true)).toBe(1234);
     expect(limit).toHaveBeenCalledWith(settings, true);
+  });
+});
+
+describe('resolveCharLimits / pickCharLimit', () => {
+  const telegram = (_settings: unknown, hasMedia: boolean) =>
+    telegramLimit(hasMedia);
+
+  it('gives each thread message its own Telegram limit by its own media', () => {
+    // Альбом с подписью и промпт вторым сообщением без вложений: 1024 и 4096,
+    // а не 1024 на оба из-за медиа первого сообщения.
+    const limits = resolveCharLimits(telegram, []);
+    expect(pickCharLimit(limits, true)).toBe(TELEGRAM_CAPTION_LIMIT);
+    expect(pickCharLimit(limits, false)).toBe(TELEGRAM_TEXT_LIMIT);
+  });
+
+  it('keeps a numeric limit equal with and without media', () => {
+    const limits = resolveCharLimits(MAX_TEXT_LIMIT, []);
+    expect(pickCharLimit(limits, true)).toBe(4000);
+    expect(pickCharLimit(limits, false)).toBe(4000);
+  });
+
+  it('treats a missing limit as zero, like the editor pill did', () => {
+    expect(resolveCharLimits(undefined, [])).toBeUndefined();
+    expect(pickCharLimit(undefined, true)).toBe(0);
   });
 });
 

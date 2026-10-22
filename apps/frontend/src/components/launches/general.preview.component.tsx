@@ -7,6 +7,10 @@ import { textSlicer } from '@gitroom/helpers/utils/count.length';
 import SafeImage from '@gitroom/react/helpers/safe.image';
 import { useLaunchStore } from '@gitroom/frontend/components/new-launch/store';
 import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
+import {
+  CharLimits,
+  pickCharLimit,
+} from '@gitroom/frontend/components/new-launch/providers/max.characters';
 
 type PreviewTransformResult = {
   content: string;
@@ -14,7 +18,7 @@ type PreviewTransformResult = {
 };
 
 export const GeneralPreviewComponent: FC<{
-  maximumCharacters?: number;
+  maximumCharacters?: CharLimits;
   transformContent?: (
     content: string,
     maximumCharacters: number
@@ -25,8 +29,11 @@ export const GeneralPreviewComponent: FC<{
   const current = useLaunchStore((state) => state.current);
   const mediaDir = useMediaDirectory();
 
-  const maximumCharacters = props.maximumCharacters || 10000;
   const renderContent = topValue.map((p) => {
+    // Лимит сообщения зависит от его собственных вложений (Telegram: caption
+    // против текста), поэтому выбирается внутри map, а не один раз на тред.
+    const maximumCharacters =
+      pickCharLimit(props.maximumCharacters, !!p.image?.length) || 10000;
     const contentWithMentionTokens = p.content.replace(
       /<span.*?data-mention-id="([.\s\S]*?)"[.\s\S]*?>([.\s\S]*?)<\/span>/gi,
       (match, match1, match2) => {

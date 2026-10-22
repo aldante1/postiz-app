@@ -54,6 +54,10 @@ import { Placeholder } from '@tiptap/extensions';
 import { useToaster } from '@gitroom/react/toaster/toaster';
 import { InformationComponent } from '@gitroom/frontend/components/launches/information.component';
 import {
+  CharLimits,
+  pickCharLimit,
+} from '@gitroom/frontend/components/new-launch/providers/max.characters';
+import {
   LockIcon,
   ConnectionLineIcon,
   ResetIcon,
@@ -515,10 +519,10 @@ export const Editor: FC<{
   validateChars?: boolean;
   comments: boolean | 'no-media';
   identifier?: string;
-  totalChars?: number;
+  totalChars?: CharLimits;
   selectedIntegration: SelectedIntegrations[];
   dummy: boolean;
-  chars: Record<string, number>;
+  chars: Record<string, CharLimits | undefined>;
   childButton?: React.ReactNode;
 }> = (props) => {
   const {
@@ -765,7 +769,10 @@ export const Editor: FC<{
                       totalChars={
                         isTelegram || isMax ? richChars : valueWithoutHtml.length
                       }
-                      totalAllowedChars={props.totalChars}
+                      totalAllowedChars={pickCharLimit(
+                        props.totalChars,
+                        pictures?.length > 0
+                      )}
                       text={valueWithoutHtml}
                     />
                   }

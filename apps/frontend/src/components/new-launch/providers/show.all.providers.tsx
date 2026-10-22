@@ -241,7 +241,9 @@ export const ShowAllProviders = forwardRef((props, ref) => {
             </div>
           ) : (
             <div className="border border-borderPreview rounded-[12px] shadow-previewShadow">
-              <GeneralPreviewComponent maximumCharacters={100000000} />
+              <GeneralPreviewComponent
+                maximumCharacters={{ text: 100000000, media: 100000000 }}
+              />
             </div>
           )}
         </IntegrationContext.Provider>

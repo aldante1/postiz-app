@@ -2,9 +2,10 @@ import { GeneralPreviewComponent } from '@gitroom/frontend/components/launches/g
 import { prepareRichPreviewHtml } from '@gitroom/frontend/components/launches/rich.text.preview';
 import { sanitizePostContent } from '@gitroom/helpers/utils/sanitize.post.content';
 import { FC } from 'react';
+import type { CharLimits } from '@gitroom/frontend/components/new-launch/providers/max.characters';
 
 type RichTextPreviewProps = {
-  maximumCharacters?: number;
+  maximumCharacters?: CharLimits;
 };
 
 export const createRichTextPreviewComponent = (

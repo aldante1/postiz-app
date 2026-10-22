@@ -5,6 +5,7 @@ import dayjs from 'dayjs';
 import { Integrations } from '@gitroom/frontend/components/launches/calendar.context';
 import { createRef, RefObject } from 'react';
 import { PostComment } from '@gitroom/frontend/components/new-launch/providers/post-comment.enum';
+import type { CharLimits } from '@gitroom/frontend/components/new-launch/providers/max.characters';
 import { newDayjs } from '@gitroom/frontend/components/layout/set.timezone';
 
 interface Values {
@@ -33,7 +34,7 @@ interface StoreState {
   dummy: boolean;
   repeater?: number;
   isCreateSet: boolean;
-  totalChars: number;
+  totalChars?: CharLimits;
   activateExitButton: boolean;
   tags: { label: string; value: string }[];
   tab: 0 | 1;
@@ -115,7 +116,7 @@ interface StoreState {
   setRepeater: (repeater: number) => void;
   setTags: (tags: { label: string; value: string }[]) => void;
   setIsCreateSet: (isCreateSet: boolean) => void;
-  setTotalChars?: (totalChars: number) => void;
+  setTotalChars?: (totalChars?: CharLimits) => void;
   appendInternalValueMedia: (
     integrationId: string,
     index: number,
@@ -130,8 +131,8 @@ interface StoreState {
   setDummy: (dummy: boolean) => void;
   setEditor: (editor: 'none' | 'normal' | 'markdown' | 'html') => void;
   setLoaded?: (loaded: boolean) => void;
-  setChars: (id: string, chars: number) => void;
-  chars: Record<string, number>;
+  setChars: (id: string, chars?: CharLimits) => void;
+  chars: Record<string, CharLimits | undefined>;
   setComments: (comments: boolean | 'no-media') => void;
 }
 
@@ -144,7 +145,7 @@ const initialState = {
   date: newDayjs(),
   postComment: PostComment.ALL,
   tags: [] as { label: string; value: string }[],
-  totalChars: 0,
+  totalChars: undefined as CharLimits | undefined,
   tab: 0 as 0,
   isCreateSet: false,
   current: 'global',
@@ -567,7 +568,7 @@ export const useLaunchStore = create<StoreState>()((set) => ({
           : item
       ),
     })),
-  setTotalChars: (totalChars: number) =>
+  setTotalChars: (totalChars?: CharLimits) =>
     set((state) => ({
       totalChars,
     })),
@@ -621,7 +622,7 @@ export const useLaunchStore = create<StoreState>()((set) => ({
     set((state) => ({
       loaded,
     })),
-  setChars: (id: string, chars: number) =>
+  setChars: (id: string, chars?: CharLimits) =>
     set((state) => ({
       chars: {
         ...state.chars,

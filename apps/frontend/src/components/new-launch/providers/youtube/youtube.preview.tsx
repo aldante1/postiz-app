@@ -5,9 +5,13 @@ import { useMediaDirectory } from '@gitroom/react/helpers/use.media.directory';
 import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
 import { textSlicer } from '@gitroom/helpers/utils/count.length';
 import { VideoOrImage } from '@gitroom/react/helpers/video.or.image';
+import {
+  CharLimits,
+  pickCharLimit,
+} from '@gitroom/frontend/components/new-launch/providers/max.characters';
 
 export const YoutubePreview: FC<{
-  maximumCharacters?: number;
+  maximumCharacters?: CharLimits;
 }> = (props) => {
   const { value: topValue, integration } = useIntegration();
   const current = useLaunchStore((state) => state.current);
@@ -27,7 +31,7 @@ export const YoutubePreview: FC<{
 
     const { start, end } = textSlicer(
       integration?.identifier || '',
-      props.maximumCharacters || 10000,
+      pickCharLimit(props.maximumCharacters, !!p.image?.length) || 10000,
       newContent
     );
 

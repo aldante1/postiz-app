@@ -6,6 +6,10 @@ import { textSlicer } from '@gitroom/helpers/utils/count.length';
 import { FC, ReactNode } from 'react';
 import { SliderComponent } from '@gitroom/frontend/components/third-parties/slider.component';
 import { VideoOrImage } from '@gitroom/react/helpers/video.or.image';
+import {
+  CharLimits,
+  pickCharLimit,
+} from '@gitroom/frontend/components/new-launch/providers/max.characters';
 
 const TikTokItem: FC<{ icon: ReactNode; num: string }> = ({ icon, num }) => {
   return (
@@ -18,7 +22,7 @@ const TikTokItem: FC<{ icon: ReactNode; num: string }> = ({ icon, num }) => {
   );
 };
 export const TiktokPreview: FC<{
-  maximumCharacters?: number;
+  maximumCharacters?: CharLimits;
 }> = (props) => {
   const { value: topValue, integration } = useIntegration();
   const current = useLaunchStore((state) => state.current);
@@ -38,7 +42,7 @@ export const TiktokPreview: FC<{
 
     const { start, end } = textSlicer(
       integration?.identifier || '',
-      props.maximumCharacters || 10000,
+      pickCharLimit(props.maximumCharacters, !!p.image?.length) || 10000,
       newContent
     );
 

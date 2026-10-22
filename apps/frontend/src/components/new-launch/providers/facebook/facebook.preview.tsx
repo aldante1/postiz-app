@@ -8,6 +8,10 @@ import { getPresetBackground } from '@gitroom/frontend/components/new-launch/pro
 import { FC } from 'react';
 import { useFormContext, useWatch } from 'react-hook-form';
 import { VideoOrImage } from '@gitroom/react/helpers/video.or.image';
+import {
+  CharLimits,
+  pickCharLimit,
+} from '@gitroom/frontend/components/new-launch/providers/max.characters';
 
 const Icons = () => {
   return (
@@ -63,7 +67,7 @@ const Icons = () => {
 };
 
 export const FacebookPreview: FC<{
-  maximumCharacters?: number;
+  maximumCharacters?: CharLimits;
 }> = (props) => {
   const { value: topValue, integration } = useIntegration();
   const current = useLaunchStore((state) => state.current);
@@ -102,7 +106,7 @@ export const FacebookPreview: FC<{
 
     const { start, end } = textSlicer(
       integration?.identifier || '',
-      props.maximumCharacters || 10000,
+      pickCharLimit(props.maximumCharacters, !!p.image?.length) || 10000,
       newContent
     );
 

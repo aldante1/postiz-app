@@ -38,11 +38,10 @@ interface CharacterCondition {
 }
 
 import {
+  CharLimits,
   MaximumCharacters,
-  resolveMaxCharacters,
+  resolveCharLimits,
 } from '@gitroom/frontend/components/new-launch/providers/max.characters';
-
-export { resolveMaxCharacters };
 
 export const withProvider = function <T extends object>(params: {
   comments?: boolean | 'no-media';
@@ -52,7 +51,7 @@ export const withProvider = function <T extends object>(params: {
     values?: any;
   }> | null;
   CustomPreviewComponent?: FC<{
-    maximumCharacters?: number;
+    maximumCharacters?: CharLimits;
   }>;
   dto?: any;
   maximumCharacters?: MaximumCharacters;
@@ -111,13 +110,13 @@ export const withProvider = function <T extends object>(params: {
       }))
     );
 
-    const hasMedia =
-      ((internal?.integrationValue ?? global)[0]?.media?.length ?? 0) > 0;
-    const getMaximumCharacters = () =>
-      resolveMaxCharacters(
+    // Обе цифры сразу: у Telegram лимит зависит от вложений КОНКРЕТНОГО
+    // сообщения треда, а не первого. Свою цифру каждый редактор берёт
+    // через `pickCharLimit` по собственным медиа.
+    const getCharLimits = () =>
+      resolveCharLimits(
         maximumCharacters,
-        JSON.parse(selectedIntegration.integration.additionalSettings || '[]'),
-        hasMedia
+        JSON.parse(selectedIntegration.integration.additionalSettings || '[]')
       );
 
     useEffect(() => {
@@ -125,14 +124,14 @@ export const withProvider = function <T extends object>(params: {
         return;
       }
 
-      const resolvedMaximumCharacters = getMaximumCharacters();
+      const charLimits = getCharLimits();
 
-      setChars(props.id, resolvedMaximumCharacters);
+      setChars(props.id, charLimits);
 
       if (isGlobal) {
         setComments(true);
         setPostComment(PostComment.ALL);
-        setTotalChars(0);
+        setTotalChars(undefined);
         setEditor('normal');
       }
 
@@ -142,9 +141,9 @@ export const withProvider = function <T extends object>(params: {
         );
         setEditor(selectedIntegration?.integration.editor);
         setPostComment(postComment);
-        setTotalChars(resolvedMaximumCharacters);
+        setTotalChars(charLimits);
       }
-    }, [justCurrent, current, isGlobal, setTotalChars, hasMedia]);
+    }, [justCurrent, current, isGlobal, setTotalChars]);
 
     const getInternalPlugs = useCallback(async () => {
       return (
@@ -192,7 +191,6 @@ export const withProvider = function <T extends object>(params: {
             err: form.formState.errors,
             settings,
             values: value,
-            maximumCharacters: getMaximumCharacters(),
             fix: () => {
               setCurrent(props.id);
               setHide(true);
@@ -254,13 +252,9 @@ export const withProvider = function <T extends object>(params: {
                 (!SettingsComponent && !data?.internalPlugs?.length)) &&
               !!value?.[0]?.content?.length &&
               (CustomPreviewComponent ? (
-                <CustomPreviewComponent
-                  maximumCharacters={getMaximumCharacters()}
-                />
+                <CustomPreviewComponent maximumCharacters={getCharLimits()} />
               ) : (
-                <GeneralPreviewComponent
-                  maximumCharacters={getMaximumCharacters()}
-                />
+                <GeneralPreviewComponent maximumCharacters={getCharLimits()} />
               ))}
             {(SettingsComponent || !!data?.internalPlugs?.length) &&
               createPortal(
@@ -329,7 +323,7 @@ export const getProviderSettingsMeta = (component: unknown) => {
   return (component as any)?.__settings as
     | {
         SettingsComponent: FC<{ values?: any }> | null;
-        CustomPreviewComponent?: FC<{ maximumCharacters?: number }>;
+        CustomPreviewComponent?: FC<{ maximumCharacters?: CharLimits }>;
         dto?: any;
         postComment: PostComment;
         maximumCharacters?: MaximumCharacters;

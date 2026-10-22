@@ -6,9 +6,13 @@ import { textSlicer } from '@gitroom/helpers/utils/count.length';
 import { FC } from 'react';
 import { VideoOrImage } from '@gitroom/react/helpers/video.or.image';
 import { SliderComponent } from '@gitroom/frontend/components/third-parties/slider.component';
+import {
+  CharLimits,
+  pickCharLimit,
+} from '@gitroom/frontend/components/new-launch/providers/max.characters';
 
 export const InstagramPreview: FC<{
-  maximumCharacters?: number;
+  maximumCharacters?: CharLimits;
 }> = (props) => {
   const { value: topValue, integration } = useIntegration();
   const current = useLaunchStore((state) => state.current);
@@ -28,7 +32,7 @@ export const InstagramPreview: FC<{
 
     const { start, end } = textSlicer(
       integration?.identifier || '',
-      props.maximumCharacters || 10000,
+      pickCharLimit(props.maximumCharacters, !!p.image?.length) || 10000,
       newContent
     );
 

@@ -4,9 +4,13 @@ import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validatio
 import { textSlicer } from '@gitroom/helpers/utils/count.length';
 import { VideoOrImage } from '@gitroom/react/helpers/video.or.image';
 import { useMediaDirectory } from '@gitroom/react/helpers/use.media.directory';
+import {
+  CharLimits,
+  pickCharLimit,
+} from '@gitroom/frontend/components/new-launch/providers/max.characters';
 
 export const PinterestPreview: FC<{
-  maximumCharacters?: number;
+  maximumCharacters?: CharLimits;
 }> = (props) => {
   const { value: topValue, integration } = useIntegration();
   const mediaDir = useMediaDirectory();
@@ -25,7 +29,7 @@ export const PinterestPreview: FC<{
 
     const { start, end } = textSlicer(
       integration?.identifier || '',
-      props.maximumCharacters || 10000,
+      pickCharLimit(props.maximumCharacters, !!p.image?.length) || 10000,
       newContent
     );
 
